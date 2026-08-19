@@ -8,6 +8,22 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 
+export type * from './types.js'
+export {
+  BranchRegistryError,
+  createBranch,
+  createFileStore,
+  emptyState,
+  getBranch,
+  listBranches,
+  loadRegistry,
+  removeBranch,
+  renameBranch,
+  saveRegistry,
+  setBranchSession,
+} from './registry.js'
+export type { CreateBranchInput } from './registry.js'
+
 export const name = 'dsh-fork'
 
 /** No service dependencies yet; later stages will inject dsh services. */
