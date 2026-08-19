@@ -1,6 +1,6 @@
 # ROADMAP — dsh-fork: Git-style conversation branching for DeepSeek Harness
 
-Status: **planning** (no code yet) · Upstream: source checkout of dsh at `/Users/skd/Documents/deepseek-harness` · Delivery form: standalone dsh plugin package
+Status: **v0.0.1 implemented** (ref layer shipped; see §2 and §4) · Upstream: source checkout of dsh at `/Users/skd/Documents/deepseek-harness` · Delivery form: standalone dsh plugin package
 
 This document is the single source of truth for scope, milestones, and acceptance
 boundaries. Agents and humans should treat each milestone's **Acceptance** section as
@@ -55,12 +55,22 @@ missing is the **git layer on top**:
 Deliverables:
 
 - Plugin package skeleton (cordis plugin; installs into the web profile).
-- Branch registry storage (via `ctx.storage`; one JSON file per workspace).
-  Record shape: `{ name, sessionId, forkOrigin: { parentSessionId, atSeq } | null }`.
-  The root branch has `forkOrigin: null`.
-- Slash commands: `/branch create <name>` (adopt current or forked session),
-  `/branch fork <name>` (one-step named fork at the current turn end),
-  `/branch list`, `/branch switch <name>` (open the referenced session).
+- Branch registry storage (via the storage-domain facility over `ctx.storage`:
+  domain `dsh_fork`, table `branches`, one record per workspace keyed by the
+  session's `cwd`). Record shape: `{ name, sessionId, forkOrigin:
+  { parentSessionId, atSeq } | null, createdAt? }`. The root branch has
+  `forkOrigin: null`.
+- Slash commands (shipped set): `/branch <name>` or `/branch create <name>`
+  (fork the current session at its last completed turn; cold sources are
+  forked via the seeded `ctx.agents.create` path with the source's recorded
+  preset composition and workspace attachment, mirroring the host's
+  `session.fork`), `/branch adopt <name>` (adopt the current session as the
+  workspace's root branch, `forkOrigin: null`), `/branch list`,
+  `/branch rm <name> --yes` (explicit-flag confirm; never deletes session
+  data), `/branch rename <old> <new>`.
+- `/branch switch <name>` (open the referenced session) is **deferred to
+  v0.0.2**: session switching needs GUI cooperation, which this milestone's
+  zero-client-change boundary excludes.
 - Dangling-ref policy: a branch whose session was deleted/archived is listed as
   dangling; deletion of the branch is explicit.
 
@@ -80,6 +90,9 @@ Deliverables:
 
 - Spike (time-boxed, first): client-plugin packaging path — how plugin UI code reaches
   the Web GUI bundle, including rebuild/refresh workflow on a source checkout.
+- `/branch switch <name>` (deferred from v0.0.1): open the referenced session;
+  now possible because this milestone owns the GUI cooperation it needs
+  (likely by hooking the Web UI's existing fork/branch interactions).
 - Session list: branch name labels; child branches stay nested under their parent
   (dsh already nests by `parentSessionId`).
 - Fork origin indicator: "forked from `<parent>` @ message N" (anchor from the
@@ -161,3 +174,8 @@ Candidate scope, deliberately unordered; each requires its own design note befor
 
 - 2026-08-19 — Initial roadmap from design phase (research notes archived separately
   in Mnemon document `dsh-fork-fbe60543`; source-level evidence lives there, not here).
+- v0.0.1 shipped — sync scope with implementation: command family is
+  `/branch <name>`/`create`, `adopt`, `list`, `rm --yes`, `rename`;
+  `/branch switch` deferred to v0.0.2 (needs GUI cooperation); registry
+  storage clarified as the `dsh_fork` storage-domain (record per workspace
+  cwd, not one JSON file per workspace).
