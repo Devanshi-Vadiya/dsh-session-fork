@@ -23,6 +23,18 @@ export {
   setBranchSession,
 } from './registry.js'
 export type { CreateBranchInput } from './registry.js'
+export {
+  BranchForkError,
+  createBranchFrom,
+  createRootBranch,
+  forkBoundaryOf,
+} from './branch.js'
+export type {
+  BranchPorts,
+  CreateBranchOptions,
+  SourceEvent,
+  SourceSessionView,
+} from './branch.js'
 
 export const name = 'dsh-fork'
 
