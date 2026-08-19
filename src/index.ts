@@ -240,6 +240,21 @@ async function sessionExists(ctx: Context, sessionId: string): Promise<boolean> 
 }
 
 /**
+ * The `/branch` command definition registered by {@link apply}.
+ *
+ * The `input` descriptor is load-bearing: the web client's admission
+ * (ui-commands matchEnter) treats a registered command without one as
+ * bare-only — `/branch main` would fall through to a normal message. With
+ * a hint the command claims its leading arguments, and the handler receives
+ * them through `invocation.rawInput`.
+ */
+export const branchCommandDefinition = {
+  name: 'branch',
+  description: 'Git-style conversation branches: create, list, rm, rename',
+  input: { hint: '[<name> | create <name> | adopt <name> | list | rm <name> --yes | rename <old> <new>]' },
+} as const
+
+/**
  * Register `/branch` and own the storage-domain lifecycle. Follows the
  * command-compact lifecycle shape: the registration disposer runs first and
  * the in-flight drain last (composite teardown is LIFO), so a drained
@@ -251,8 +266,7 @@ export async function apply(ctx: Context): Promise<void> {
 
   ctx.effect(function* () {
     yield ctx.commands.register({
-      name: 'branch',
-      description: 'Git-style conversation branches: create, list, rm, rename',
+      ...branchCommandDefinition,
       handler: (invocation: CommandInvocation): Promise<CommandResult> => {
         const workspaceKey = invocation.agent.session.header.cwd ?? ''
         const operation = Promise.resolve(

@@ -24,6 +24,8 @@ Prefer a local path (`file:/path/to/dsh-session-fork`) or the npm package. Git d
 
 ## Usage
 
+Arguments are typed after the command in the same message — e.g. `/branch review` forks immediately; there is no separate argument prompt. (The command registers an input hint so the Web GUI treats `/branch <args>` as a command, not a normal chat message.)
+
 ```
 /branch review
 ```
