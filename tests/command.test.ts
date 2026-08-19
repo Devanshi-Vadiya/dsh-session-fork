@@ -50,16 +50,14 @@ interface Harness {
   readonly deps: BranchCommandDeps
   readonly store: ReturnType<typeof memoryStore>
   readonly children: string[]
-  liveSource: boolean
 }
 
 function harness(): Harness {
   const store = memoryStore()
   const children: string[] = []
-  const h: Harness = {
+  return {
     store,
     children,
-    liveSource: true,
     deps: {
       currentSessionId: 's-parent',
       store,
@@ -72,19 +70,12 @@ function harness(): Harness {
             ? sessionOf('s-cold')
             : null
         },
-        forkLive(sourceId, boundarySeq, childId) {
-          if (!h.liveSource) return false
-          expect(boundarySeq).toBe(7)
-          children.push(childId)
-          return true
-        },
         async createChildFromSeed(childId) {
           children.push(childId)
         },
       },
     },
   }
-  return h
 }
 
 describe('parseBranchAction', () => {
@@ -150,9 +141,31 @@ describe('executeBranchAction', () => {
     expect(Object.keys(h.store.dump()!.branches)).toEqual(['review'])
   })
 
-  test('cold source still creates a branch', async () => {
+  test('duplicate name fails before forking, orphaning no child session', async () => {
     const h = harness()
-    h.liveSource = false
+    await executeBranchAction(parseBranchAction('review'), h.deps)
+    const before = h.children.length
+    const result = await executeBranchAction(parseBranchAction('review'), h.deps)
+    expect(result.kind).toBe('error')
+    // The name pre-check runs ahead of the fork, so no second child is
+    // spawned for a name that can never be registered.
+    expect(h.children).toHaveLength(before)
+  })
+
+  test('invalid name fails before forking', async () => {
+    const h = harness()
+    // Single token containing a control char: parses as `create`, but the
+    // name itself is invalid, so it must fail before any fork happens.
+    const result = await executeBranchAction(parseBranchAction('a\u0000b'), h.deps)
+    expect(result.kind).toBe('error')
+    if (result.kind === 'error') expect(result.text).toContain('Invalid branch name')
+    expect(h.children).toHaveLength(0)
+    expect(h.store.dump()).toBeNull()
+  })
+
+  test('cold source still creates a branch through the same route', async () => {
+    const h = harness()
+    h.deps = { ...h.deps, currentSessionId: 's-cold' }
     const result = await executeBranchAction(parseBranchAction('cold'), h.deps)
     expect(result.kind).toBe('success')
     expect(h.children).toHaveLength(1)

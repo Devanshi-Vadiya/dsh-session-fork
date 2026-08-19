@@ -1,22 +1,23 @@
 /**
- * Branch creation: fork a session through the kernel path and record the ref.
+ * Branch creation: seed a child session through the official agent path and
+ * record the ref.
  * @module dsh-fork/src/branch
  *
- * Two durable routes mirror what the host's own api-proxy does for
- * `session.fork`:
+ * A single durable route mirrors the host web GUI's own fork
+ * (api-proxy `session.fork`) for **every** source, live or cold: the seed
+ * slice is written through `ctx.agents.create({ sessionId, seed, meta })`
+ * with `meta.parentSession` + `seedLength`, and the child is attached to
+ * the source's workspace. The kernel `SessionStore.fork` shortcut is
+ * deliberately NOT used: sessions created through it are scoped to the
+ * calling fiber (they are evicted from the store and broadcast
+ * `session-removed` when the command's turn ends) and never join a
+ * workspace, so their sidebar rows vanish. The `agents.create` path is the
+ * only one that yields a durable, listed, resumable child — so it is the
+ * only one.
  *
- * 1. **Live source** — the source session is live in `ctx.sessions` (the
- *    kernel `SessionStore`), so the fork goes through
- *    `SessionStore.fork(source, boundary, childId)` which seeds a live child
- *    from a stable prefix and stamps its header with `parentSession` +
- *    `seedLength`.
- * 2. **Cold source** — the source is only on disk; the same seed is written
- *    through a `ctx.agents.create({ sessionId, seed, meta })` child, exactly
- *    like the web GUI's fork of a non-live session.
- *
- * Both routes use the same boundary computation (see {@link forkBoundaryOf}).
- * All dsh touchpoints are injected through {@link BranchPorts}, so the logic
- * is unit-testable without cordis.
+ * Boundary computation is shared by both kinds of source (see
+ * {@link forkBoundaryOf}). All dsh touchpoints are injected through
+ * {@link BranchPorts}, so the logic is unit-testable without cordis.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -54,18 +55,13 @@ export interface SourceSessionView {
  * Injected dsh capabilities. Production wires:
  * - `readSession` — api-proxy's `readSessionState`: `ctx.sessions.get(id)`
  *   first, then the persistence inspect path.
- * - `forkLive` — kernel `SessionStore.fork(sourceId, boundarySeq, childId)`;
- *   returns `false` when the source is not live in the store.
  * - `createChildFromSeed` — `ctx.agents.create({ sessionId, seed, meta })`
- *   with `meta.parentSession`/`seedLength`, for cold sources.
+ *   with `meta.parentSession`/`seedLength` plus workspace attach, the exact
+ *   path the web GUI's fork button takes. Used for live and cold sources
+ *   alike.
  */
 export interface BranchPorts {
   readSession(sessionId: string): Promise<SourceSessionView | null>
-  forkLive(
-    sourceId: string,
-    boundarySeq: number,
-    childId: string,
-  ): Promise<boolean> | boolean
   createChildFromSeed(
     childId: string,
     source: SourceSessionView,
@@ -154,20 +150,11 @@ export async function createBranchFrom(
     )
   }
   const childId = options.childId ?? `session-${randomUUID() as string}`
-  // Route 1: kernel SessionStore.fork on a live source. Passing the seq of
-  // the last seed event (cut-1) as the inclusive boundary makes the kernel
-  // slice exactly the prefix the cold path would persist, and its own
-  // closed-turn check still anchors on the same turn/end.
-  const forkedLive = await ports.forkLive(
-    source.id,
-    source.events[boundary.cut - 1]!.seq,
-    childId,
-  )
-  if (!forkedLive) {
-    // Route 2: cold source — write the seeded child durably (the
-    // ctx.agents.create path); the store then holds it live as well.
-    await ports.createChildFromSeed(childId, source, boundary.cut)
-  }
+  // Single official route: agents.create with the seed prefix + workspace
+  // attach, regardless of whether the source is live or on-disk. This is
+  // exactly what the web GUI's fork does (api-proxy session.fork), and it
+  // is the only path that produces a durable, workspace-listed child.
+  await ports.createChildFromSeed(childId, source, boundary.cut)
   return Object.freeze({
     name,
     sessionId: childId,

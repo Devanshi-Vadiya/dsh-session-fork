@@ -21,6 +21,7 @@ import type { DomainLike } from './store.js'
 export type * from './types.js'
 export {
   BranchRegistryError,
+  assertBranchNameFree,
   createBranch,
   createFileStore,
   emptyState,
@@ -61,7 +62,7 @@ export const inject = ['commands', 'storageDomain', 'sessions', 'sessionPersiste
 
 /**
  * Full log (header + events) of each view handed out by {@link makePorts},
- * retained so the seeded cold-fork path can slice the real `SessionEvent`
+ * retained so the seeded fork path can slice the real `SessionEvent`
  * objects and resolve the source's recorded preset. (The view itself only
  * promises `{ seq, type }` + cwd to keep boundary logic testable.)
  */
@@ -173,26 +174,29 @@ function makePorts(ctx: Context): BranchPorts {
         return null
       }
     },
-    forkLive(sourceId, boundarySeq, childId) {
-      // Only the kernel store can fork a live source; anything else falls
-      // through to the seeded creation path.
-      if (ctx.sessions.get(sourceId as Session['id']) === undefined) return false
-      ctx.sessions.fork(sourceId as Session['id'], boundarySeq, childId as Session['id'])
-      return true
-    },
     async createChildFromSeed(childId, source, cut) {
       const log = sourceLogs.get(source)
-      const events = log?.events ?? []
+      if (log === undefined) {
+        // Invariant: makePorts always pairs a view with its full log. A miss
+        // means a port caller fabricated a view — slicing a fabricated seed
+        // would silently fork from nothing.
+        throw new Error(
+          `dsh-fork invariant violation: no source log retained for session "${source.id}"`,
+        )
+      }
+      const events = log.events
       // Mirror api-proxy's session.fork composition: the child inherits the
       // source's recorded preset (its seeded history was produced under that
-      // composition) and joins the source's workspace. Without the preset the
-      // child would carry tool calls it can no longer compose.
+      // composition) and joins the source's workspace. When the presets
+      // service is mounted we always resolve — a session without a recorded
+      // selection still gets the default preset written to meta, exactly
+      // like the official compose path; without it the child would carry
+      // tool calls it can no longer compose.
       const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
-      const presetId = log === undefined ? undefined : resolveSessionPreset(log)
       let agentPreset: string | undefined
       let setup: ((agentCtx: Context) => Promise<void>) | undefined
-      if (presets !== undefined && presetId !== undefined) {
-        agentPreset = (await presets.resolve(presetId)).id
+      if (presets !== undefined) {
+        agentPreset = (await presets.resolve(resolveSessionPreset(log))).id
         const resolvedId = agentPreset
         setup = async (agentCtx: Context) => {
           await presets.mount(agentCtx, resolvedId)
@@ -202,6 +206,10 @@ function makePorts(ctx: Context): BranchPorts {
       const defaultModel = ctx.get('agentDefaultModel') as
         | { currentSelection(): { provider: string; model: string } }
         | undefined
+      // Resolve the target workspace BEFORE creating the child, like the
+      // official path: creation is the point of no return, so everything
+      // that can be settled up front is.
+      const workspace = await forkWorkspaceOf(ctx, source, log)
       await ctx.agents.create({
         sessionId: childId as Session['id'],
         seed: events.slice(0, cut),
@@ -214,16 +222,9 @@ function makePorts(ctx: Context): BranchPorts {
         ...(defaultModel === undefined ? {} : { agentOptions: defaultModel.currentSelection() }),
         ...(setup === undefined ? {} : { setup }),
       })
-      // Best-effort workspace attach, like api-proxy: the child is already
-      // published, an attach failure must not lose it.
-      try {
-        const workspace = await forkWorkspaceOf(ctx, source, log)
-        await workspace?.attachSession(childId)
-      } catch (error) {
-        ctx.logger.warn(
-          `dsh-fork: forked session "${childId}" could not attach to its workspace: ${String(error)}`,
-        )
-      }
+      // Attach failures are surfaced, not swallowed: an unattached child is
+      // real but invisible in its workspace, which the user must hear about.
+      await workspace?.attachSession(childId)
     },
   }
 }

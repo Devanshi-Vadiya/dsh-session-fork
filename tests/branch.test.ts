@@ -1,6 +1,7 @@
 /**
- * Tests for branch creation: boundary anchoring, live/cold fork routes,
- * root adoption, and missing-source errors.
+ * Tests for branch creation: boundary anchoring, the single seeded-child
+ * fork route (live and cold sources alike), root adoption, and
+ * missing-source errors.
  * @module dsh-fork/tests/branch.test
  */
 
@@ -15,9 +16,8 @@ import {
 import type { BranchPorts } from '../src/branch.js'
 
 interface Call {
-  readonly kind: 'forkLive' | 'createChildFromSeed'
+  readonly kind: 'createChildFromSeed'
   readonly sourceId: string
-  readonly boundarySeq: number
   readonly cut: number
   readonly childId: string
 }
@@ -29,28 +29,21 @@ function sessionOf(id: string, types: readonly string[]): SourceSessionView {
 }
 
 /**
- * Fake ports with a scriptable liveness answer; records every fork call.
+ * Fake ports recording every child-creation call. There is exactly one
+ * production route — the seeded `agents.create` path — for live and cold
+ * sources alike, so the fake needs no liveness scripting.
  */
-function portsOf(
-  sessions: readonly SourceSessionView[],
-  liveIds: readonly string[] = [],
-): BranchPorts & { calls: readonly Call[] } {
+function portsOf(sessions: readonly SourceSessionView[]): BranchPorts & { calls: readonly Call[] } {
   const calls: Call[] = []
-  const live = new Set(liveIds)
   return {
     calls,
     async readSession(sessionId) {
       return sessions.find(s => s.id === sessionId) ?? null
     },
-    forkLive(sourceId, boundarySeq, childId) {
-      calls.push({ kind: 'forkLive', sourceId, boundarySeq, cut: -1, childId })
-      return live.has(sourceId)
-    },
     async createChildFromSeed(childId, source, cut) {
       calls.push({
         kind: 'createChildFromSeed',
         sourceId: source.id,
-        boundarySeq: -1,
         cut,
         childId,
       })
@@ -120,8 +113,25 @@ describe('createBranchFrom', () => {
     'turn/end',
   ]
 
-  test('live source forks through the kernel route', async () => {
-    const ports = portsOf([sessionOf('parent', log)], ['parent'])
+  test('live and cold sources take the single seeded-child route', async () => {
+    // Regression lock: a branch never goes through the kernel
+    // SessionStore.fork shortcut. Every child — from a live source read via
+    // ctx.sessions or a cold one read via persistence — is produced by one
+    // createChildFromSeed call (production: agents.create + workspace
+    // attach, exactly like the web GUI's fork).
+    const ports = portsOf([sessionOf('parent', log)])
+    const live = await createBranchFrom('parent', 'review', ports, { childId: 'child-1' })
+    const cold = await createBranchFrom('parent', 'review-2', ports, { childId: 'child-2' })
+    expect(live.forkOrigin).toEqual({ parentSessionId: 'parent', atSeq: 8 })
+    expect(cold.forkOrigin).toEqual({ parentSessionId: 'parent', atSeq: 8 })
+    expect(ports.calls).toEqual([
+      { kind: 'createChildFromSeed', sourceId: 'parent', cut: 9, childId: 'child-1' },
+      { kind: 'createChildFromSeed', sourceId: 'parent', cut: 9, childId: 'child-2' },
+    ])
+  })
+
+  test('record is frozen and carries the anchoring turn/end', async () => {
+    const ports = portsOf([sessionOf('parent', log)])
     const record = await createBranchFrom('parent', 'review', ports, { childId: 'child-1' })
     expect(record).toEqual({
       name: 'review',
@@ -129,42 +139,19 @@ describe('createBranchFrom', () => {
       forkOrigin: { parentSessionId: 'parent', atSeq: 8 },
       createdAt: record.createdAt,
     })
-    expect(record.forkOrigin!.atSeq).toBe(8)
     expect(Object.isFrozen(record)).toBe(true)
-    // Kernel boundary is the seq of the last seed event (cut-1).
-    expect(ports.calls).toEqual([
-      { kind: 'forkLive', sourceId: 'parent', boundarySeq: 8, cut: -1, childId: 'child-1' },
-    ])
-  })
-
-  test('cold source creates a seeded child and records the same origin', async () => {
-    const ports = portsOf([sessionOf('parent', log)])
-    const record = await createBranchFrom('parent', 'review', ports, { childId: 'child-2' })
-    expect(record.forkOrigin).toEqual({ parentSessionId: 'parent', atSeq: 8 })
-    // The live route is probed first, reports "not live", and the seeded
-    // creation path takes over with the full cut.
-    expect(ports.calls).toEqual([
-      { kind: 'forkLive', sourceId: 'parent', boundarySeq: 8, cut: -1, childId: 'child-2' },
-      {
-        kind: 'createChildFromSeed',
-        sourceId: 'parent',
-        boundarySeq: -1,
-        cut: 9,
-        childId: 'child-2',
-      },
-    ])
   })
 
   test('atSeq lands on the containing turn/end in the record', async () => {
-    const ports = portsOf([sessionOf('parent', log)], ['parent'])
+    const ports = portsOf([sessionOf('parent', log)])
     const record = await createBranchFrom('parent', 'early', ports, {
       atSeq: 1,
       childId: 'child-3',
     })
     expect(record.forkOrigin!.atSeq).toBe(3)
     // Seed extends through the trailing session/title up to the next
-    // turn/start (cut 5), so the kernel boundary is seq 4, not 3.
-    expect(ports.calls[0]!.boundarySeq).toBe(4)
+    // turn/start, so the seeded slice is cut 5 events long.
+    expect(ports.calls[0]!.cut).toBe(5)
   })
 
   test('missing source fails with typed error', async () => {
@@ -189,7 +176,7 @@ describe('createBranchFrom', () => {
   })
 
   test('generates a session-<uuid> child id when omitted', async () => {
-    const ports = portsOf([sessionOf('parent', log)], ['parent'])
+    const ports = portsOf([sessionOf('parent', log)])
     const record = await createBranchFrom('parent', 'auto', ports)
     expect(record.sessionId).toMatch(/^session-[0-9a-f-]{36}$/)
   })

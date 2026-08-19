@@ -11,6 +11,7 @@ import { BranchForkError, createBranchFrom as forkToBranch, createRootBranch as 
 import type { BranchListing, RegistryState, RegistryStore, SessionExists } from './types.js'
 import {
   BranchRegistryError,
+  assertBranchNameFree,
   createBranch,
   getBranch,
   listBranches,
@@ -138,13 +139,22 @@ export async function executeBranchAction(
     }
 
     case 'create': {
+      // Pre-check the name BEFORE forking: a duplicate/invalid name must
+      // fail without having spawned an orphan child session. The post-fork
+      // createBranch below stays as the authoritative registry gate.
+      const preState = await loadRegistry(deps.store)
+      try {
+        assertBranchNameFree(preState, action.name)
+      } catch (error) {
+        return { kind: 'error', text: branchErrorMessage(error) }
+      }
       let record
       try {
         record = await forkToBranch(deps.currentSessionId, action.name, deps.ports)
       } catch (error) {
         return { kind: 'error', text: branchErrorMessage(error) }
       }
-      let state = await loadRegistry(deps.store)
+      let state = preState
       try {
         state = createBranch(state, {
           name: record.name,

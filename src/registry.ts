@@ -59,6 +59,22 @@ export interface CreateBranchInput {
   readonly createdAt?: string
 }
 
+/**
+ * Validate a prospective branch name (format + availability) without
+ * registering anything. Callers that create side effects under the name —
+ * e.g. forking a child session — run this FIRST, so a bad name fails
+ * before the side effect can orphan anything.
+ */
+export function assertBranchNameFree(state: RegistryState, name: string): void {
+  assertValidName(name)
+  if (state.branches[name] !== undefined) {
+    throw new BranchRegistryError(
+      'duplicate-name',
+      `a branch named '${name}' already exists`,
+    )
+  }
+}
+
 /** Register a new branch ref. Fails on invalid or duplicate names. */
 export function createBranch(state: RegistryState, input: CreateBranchInput): RegistryState {
   assertValidName(input.name)

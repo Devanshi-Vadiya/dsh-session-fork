@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   BranchRegistryError,
+  assertBranchNameFree,
   createBranch,
   createFileStore,
   emptyState,
@@ -76,6 +77,33 @@ describe('createBranch', () => {
   test.each(['', ' padded', 'pad ', 'a\nb'])('invalid name %p fails', (name) => {
     try {
       createBranch(emptyState(), rootBranch(name, 's1'))
+      expect.unreachable()
+    } catch (error) {
+      expect((error as BranchRegistryError).code).toBe('invalid-name')
+    }
+  })
+})
+
+describe('assertBranchNameFree', () => {
+  test('accepts a fresh valid name without registering anything', () => {
+    const state = createBranch(emptyState(), rootBranch('main', 's1'))
+    expect(() => assertBranchNameFree(state, 'dev')).not.toThrow()
+    expect(Object.keys(state.branches)).toEqual(['main'])
+  })
+
+  test('duplicate name fails with duplicate-name', () => {
+    const state = createBranch(emptyState(), rootBranch('main', 's1'))
+    try {
+      assertBranchNameFree(state, 'main')
+      expect.unreachable()
+    } catch (error) {
+      expect((error as BranchRegistryError).code).toBe('duplicate-name')
+    }
+  })
+
+  test.each(['', ' padded', 'a\nb'])('invalid name %p fails with invalid-name', (name) => {
+    try {
+      assertBranchNameFree(emptyState(), name)
       expect.unreachable()
     } catch (error) {
       expect((error as BranchRegistryError).code).toBe('invalid-name')
