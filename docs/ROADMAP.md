@@ -82,6 +82,19 @@ Acceptance:
 4. Branches are scoped per workspace (cwd), matching dsh session storage scoping.
 5. Host-side only; zero client-code changes in this milestone.
 
+**Deferred TODO — branch name uniqueness scope:** branch names are currently
+globally unique across the whole workspace record set (cwd-keyed registry).
+Semantics to be discussed later:
+
+1. Sub branches under the same root should not share a name.
+2. Whether a branch adopted as root is also subject to the same-name
+   restriction is undecided.
+3. Sub branches under *different* roots should be allowed to share names
+   (currently not allowed — bug / not yet aligned with the intended semantics).
+
+v0.0.1 keeps the global-uniqueness rule as-is; revisit after the core
+features ship.
+
 ### v0.0.2 — Branch visibility (UI layer)
 
 **Goal:** a human can see the branch tree and where each fork happened.
