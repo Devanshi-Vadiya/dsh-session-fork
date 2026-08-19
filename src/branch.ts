@@ -15,13 +15,15 @@
  * only one that yields a durable, listed, resumable child — so it is the
  * only one.
  *
- * Boundary computation is shared by both kinds of source (see
- * {@link forkBoundaryOf}). All dsh touchpoints are injected through
- * {@link BranchPorts}, so the logic is unit-testable without cordis.
+ * Boundary computation is vendored from the host fork handler (see
+ * {@link forkBoundaryOf} and `src/vendor/fork.ts`). All dsh touchpoints are
+ * injected through {@link BranchPorts}, so the logic is unit-testable
+ * without cordis.
  */
 
 import { randomUUID } from 'node:crypto'
 import type { BranchRecord } from './types.js'
+import { anchoredBoundaryOf } from './vendor/fork.js'
 
 /** Typed failure of a branch-creation operation. */
 export class BranchForkError extends Error {
@@ -39,8 +41,10 @@ export class BranchForkError extends Error {
 export interface SourceEvent {
   /** Position of the event in its session log (0-based, contiguous). */
   readonly seq: number
-  /** Discriminator; only `turn/start` / `turn/end` matter here. */
+  /** Discriminator; `turn/*` and `command/*` matter here. */
   readonly type: string
+  /** Event payload, read structurally (preset selection, command pairing). */
+  readonly data?: unknown
 }
 
 /** Read-only view of a source session, live or inspected from disk. */
@@ -70,18 +74,12 @@ export interface BranchPorts {
 }
 
 /**
- * Locate the fork boundary in the source log, replicating the api-proxy
- * anchor semantics:
+ * Locate the fork boundary in the source log.
  *
- * - With `atSeq`: the first `turn/end` at or after that seq (an in-log anchor
- *   belongs to its whole turn). `null` means the containing turn has not
- *   completed yet.
- * - Without `atSeq`: the last completed `turn/end`; `null` means the session
- *   has no completed turn to fork from.
- *
- * The returned `cut` additionally extends through trailing standalone events
- * (`session/title`, injections) up to the next `turn/start`, so the seed
- * stays balanced, exactly like the host implementation.
+ * Thin adapter over the vendored copy of the api-proxy boundary logic
+ * (`anchoredBoundaryOf` in `src/vendor/fork.ts`, which also enforces the
+ * seed-balance invariant against orphan `command/run` events); see there
+ * for the upstream semantics and markers.
  *
  * @returns `null` when no completed turn anchors the fork.
  */
@@ -89,18 +87,8 @@ export function forkBoundaryOf(
   events: readonly SourceEvent[],
   atSeq?: number,
 ): { turnEndSeq: number; cut: number } | null {
-  const lastSeq = events.at(-1)?.seq ?? -1
-  // Omitted and past-end anchors retain the last-completed-turn shortcut; an
-  // in-log anchor belongs to the turn containing it and must never clip
-  // backward to an earlier completed turn (api-proxy semantics).
-  const anchored =
-    atSeq === undefined || atSeq > lastSeq
-      ? events.findLast(e => e.type === 'turn/end')
-      : events.find(e => e.type === 'turn/end' && e.seq >= atSeq)
-  if (anchored === undefined) return null
-  let cut = anchored.seq + 1
-  while (cut < events.length && events[cut]?.type !== 'turn/start') cut++
-  return { turnEndSeq: anchored.seq, cut }
+  const boundary = anchoredBoundaryOf(events, atSeq)
+  return boundary === null ? null : { turnEndSeq: boundary.boundarySeq, cut: boundary.cut }
 }
 
 /** Options for {@link createBranchFrom}. */

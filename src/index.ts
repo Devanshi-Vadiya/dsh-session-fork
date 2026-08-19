@@ -9,6 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 // Type-only presence import: pulls in this package's Context augmentation
 // (`ctx.sessionPersistence`) without any runtime dependency on it.
@@ -17,6 +18,8 @@ import type { BranchPorts, SourceSessionView } from './branch.js'
 import { executeBranchAction, parseBranchAction } from './command.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
+import { composeAgent, forkWorkspace } from './vendor/fork.js'
+import type { AgentPresetsLike, WorkspaceLike } from './vendor/fork.js'
 
 export type * from './types.js'
 export {
@@ -73,71 +76,19 @@ interface SourceLog {
 
 const sourceLogs = new WeakMap<SourceSessionView, SourceLog>()
 
-/**
- * The preset a session actually runs, newest selection winning (upstream:
- * `resolveSessionPreset` from @deepseek-ai/dsh-agent-presets, mirrored here
- * so the plugin's runtime dependency set stays `zod`-only). The header
- * supplies the creation-time value; every later selection is a logged
- * `agent-preset/selected` event, so the last one is the answer.
- */
-function resolveSessionPreset(log: SourceLog): string | undefined {
-  for (let index = log.events.length - 1; index >= 0; index -= 1) {
-    const event = log.events[index]
-    // The preset-selection event is an open-vocabulary type dsh-session's
-    // closed union does not name, hence the narrow structural cast.
-    if (event !== undefined && (event.type as string) === 'agent-preset/selected') {
-      return (event as unknown as { data: { agentPreset?: string } }).data.agentPreset
-    }
-  }
-  return log.header.agentPreset
+/** Structural slice of `ctx.get('agentDefaultModel')` relied on. */
+interface AgentDefaultModelLike {
+  currentSelection(): { provider: string; model: string }
 }
 
-/** Structural slice of `ctx.get('agentPresets')` this plugin relies on. */
-interface AgentPresetsLike {
-  resolve(id?: string): Promise<{ id: string }>
-  mount(agentCtx: Context, id?: string): Promise<unknown>
-}
-
-/** Structural slice of `ctx.get('workspaceRegistry')` workspaces relied on. */
-interface WorkspaceLike {
-  readonly id: string
-  readonly sessionIds: readonly string[]
-  attachSession(sessionId: string): Promise<unknown>
+/** Structural slice of `ctx.get('workspaceRegistry')` relied on. */
+interface WorkspaceRegistryLike {
+  list(): WorkspaceLike[]
 }
 
 /** Structural slice of `ctx.get('sessionQuery')` relied on. */
 interface SessionQueryLike {
   traceSession(sessionId: string): Promise<{ ancestors: ReadonlyArray<{ header: { id: string } }> }>
-}
-
-/**
- * Resolve the Workspace a fork's child should join — api-proxy's
- * `forkWorkspace`: the source's direct Workspace, or for a subagent source
- * (not listed directly) the nearest owning ancestor. `undefined` when no
- * workspace registry is mounted or nothing owns the lineage.
- */
-async function forkWorkspaceOf(
-  ctx: Context,
-  source: SourceSessionView,
-  log: SourceLog | undefined,
-): Promise<WorkspaceLike | undefined> {
-  const registry = ctx.get('workspaceRegistry') as
-    | { list(): WorkspaceLike[] }
-    | undefined
-  if (registry === undefined) return undefined
-  const workspaces = registry.list()
-  const direct = workspaces.find(workspace => workspace.sessionIds.includes(source.id))
-  if (direct !== undefined || log?.header.origin !== 'subagent') return direct
-  const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-  if (query === undefined) return undefined
-  const lineage = await query.traceSession(source.id)
-  for (const ancestor of lineage.ancestors) {
-    const workspace = workspaces.find(candidate =>
-      candidate.sessionIds.includes(ancestor.header.id),
-    )
-    if (workspace !== undefined) return workspace
-  }
-  return undefined
 }
 
 /** Build the fork ports over live-first session reads. */
@@ -185,31 +136,36 @@ function makePorts(ctx: Context): BranchPorts {
         )
       }
       const events = log.events
-      // Mirror api-proxy's session.fork composition: the child inherits the
-      // source's recorded preset (its seeded history was produced under that
-      // composition) and joins the source's workspace. When the presets
-      // service is mounted we always resolve — a session without a recorded
-      // selection still gets the default preset written to meta, exactly
-      // like the official compose path; without it the child would carry
-      // tool calls it can no longer compose.
-      const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
-      let agentPreset: string | undefined
-      let setup: ((agentCtx: Context) => Promise<void>) | undefined
-      if (presets !== undefined) {
-        agentPreset = (await presets.resolve(resolveSessionPreset(log))).id
-        const resolvedId = agentPreset
-        setup = async (agentCtx: Context) => {
-          await presets.mount(agentCtx, resolvedId)
-        }
-      }
-      // Seed the same default model selection the host's entry points use.
-      const defaultModel = ctx.get('agentDefaultModel') as
-        | { currentSelection(): { provider: string; model: string } }
-        | undefined
+      // The vendored helpers from src/vendor/fork.ts mirror the host fork
+      // handler's helper chain (forkWorkspace → composeAgent → agents.create
+      // → workspace.attachSession); markers and upstream coordinates live
+      // there. The host's installSelection is composed through agentOptions
+      // here (the plugin seeds the default model selection the same way as
+      // the host's entry points), so composeAgent receives a no-op installer
+      // and mounting happens in setup exactly like upstream.
+      const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+      const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
       // Resolve the target workspace BEFORE creating the child, like the
       // official path: creation is the point of no return, so everything
       // that can be settled up front is.
-      const workspace = await forkWorkspaceOf(ctx, source, log)
+      const workspace = registry === undefined
+        ? undefined
+        : await forkWorkspace(
+            {
+              listWorkspaces: () => registry.list(),
+              // Without the query service no ancestor lookup is possible;
+              // an ungrouped child is preferable to a failed fork.
+              traceSession: async id => query?.traceSession(id) ?? { ancestors: [] },
+            },
+            { id: source.id, header: log.header },
+          )
+      const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+      const forkComposition = await composeAgent(
+        { presets, installSelection: () => {} },
+        resolveSessionPreset(log),
+      )
+      // Seed the same default model selection the host's entry points use.
+      const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
       await ctx.agents.create({
         sessionId: childId as Session['id'],
         seed: events.slice(0, cut),
@@ -217,10 +173,10 @@ function makePorts(ctx: Context): BranchPorts {
           ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
           parentSession: source.id as Session['id'],
           seedLength: cut,
-          ...(agentPreset === undefined ? {} : { agentPreset }),
+          ...(forkComposition.agentPreset === undefined ? {} : { agentPreset: forkComposition.agentPreset }),
         },
         ...(defaultModel === undefined ? {} : { agentOptions: defaultModel.currentSelection() }),
-        ...(setup === undefined ? {} : { setup }),
+        setup: forkComposition.setup,
       })
       // Attach failures are surfaced, not swallowed: an unattached child is
       // real but invisible in its workspace, which the user must hear about.
