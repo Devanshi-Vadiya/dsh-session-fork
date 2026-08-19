@@ -143,9 +143,6 @@ dist
 
 # End of https://www.toptal.com/developers/gitignore/api/node
 
-### Bun ###
-bun.lock*
-
 ### Project extras ###
 # Temporary directories and files (any depth)
 tmp/
@@ -155,3 +152,8 @@ temp/
 
 # Agent teams runtime state
 .agent-teams
+
+# Build output and local install scratch (npm used only as sandbox fallback)
+lib/
+.tmp/
+package-lock.json
