@@ -7,7 +7,7 @@
  */
 
 import type { BranchPorts } from './branch.js'
-import { BranchForkError, createBranchFrom as forkToBranch } from './branch.js'
+import { BranchForkError, createBranchFrom as forkToBranch, createRootBranch as adoptAsRoot } from './branch.js'
 import type { BranchListing, RegistryState, RegistryStore, SessionExists } from './types.js'
 import {
   BranchRegistryError,
@@ -29,12 +29,13 @@ export type BranchCommandResult =
   | { readonly kind: 'error'; readonly text: string }
 
 /** Subcommands that can never be a plain branch name. */
-const SUBCOMMANDS = new Set(['list', 'rm', 'rename', 'create', 'help'])
+const SUBCOMMANDS = new Set(['list', 'rm', 'rename', 'create', 'adopt', 'help'])
 
 export const BRANCH_USAGE = [
   'Usage:',
   '  /branch <name>            fork the current session into a named branch',
   '  /branch create <name>     same as /branch <name>',
+  '  /branch adopt <name>      adopt the current session as the root branch',
   '  /branch list              list this workspace\'s branches',
   '  /branch rm <name> --yes   remove a branch ref (never deletes session data)',
   '  /branch rename <old> <new>',
@@ -44,6 +45,7 @@ export const BRANCH_USAGE = [
 export type BranchAction =
   | { readonly kind: 'list' }
   | { readonly kind: 'create'; readonly name: string }
+  | { readonly kind: 'adopt'; readonly name: string }
   | { readonly kind: 'rm'; readonly name: string; readonly confirmed: boolean }
   | { readonly kind: 'rename'; readonly from: string; readonly to: string }
   | { readonly kind: 'usage'; readonly problem: string }
@@ -65,6 +67,10 @@ export function parseBranchAction(rawInput: string): BranchAction {
       return second === undefined || tokens.length > 2
         ? { kind: 'usage', problem: `'create' takes exactly one branch name` }
         : { kind: 'create', name: second }
+    case 'adopt':
+      return second === undefined || tokens.length > 2
+        ? { kind: 'usage', problem: `'adopt' takes exactly one branch name` }
+        : { kind: 'adopt', name: second }
     case 'rm':
       if (tokens.length === 2) return { kind: 'rm', name: second!, confirmed: false }
       if (tokens.length === 3 && third === '--yes') {
@@ -160,6 +166,31 @@ export async function executeBranchAction(
       return {
         kind: 'success',
         text: `Branch '${record.name}' → session ${record.sessionId} (${origin}).`,
+      }
+    }
+
+    case 'adopt': {
+      let record
+      try {
+        record = await adoptAsRoot(deps.currentSessionId, action.name, deps.ports)
+      } catch (error) {
+        return { kind: 'error', text: branchErrorMessage(error) }
+      }
+      let state = await loadRegistry(deps.store)
+      try {
+        state = createBranch(state, {
+          name: record.name,
+          sessionId: record.sessionId,
+          forkOrigin: record.forkOrigin,
+          createdAt: record.createdAt,
+        })
+      } catch (error) {
+        return { kind: 'error', text: branchErrorMessage(error) }
+      }
+      await saveRegistry(deps.store, state)
+      return {
+        kind: 'success',
+        text: `Branch '${record.name}' → session ${record.sessionId} (root branch, adopted the current session).`,
       }
     }
 

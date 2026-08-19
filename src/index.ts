@@ -9,7 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 // Type-only presence import: pulls in this package's Context augmentation
 // (`ctx.sessionPersistence`) without any runtime dependency on it.
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -60,12 +60,84 @@ export const name = 'dsh-fork'
 export const inject = ['commands', 'storageDomain', 'sessions', 'sessionPersistence', 'agents']
 
 /**
- * Full log events of each view handed out by {@link makePorts}, retained so
- * the seeded cold-fork path can slice the real `SessionEvent` objects.
- * (The view itself only promises `{ seq, type }` to keep boundary logic
- * testable.)
+ * Full log (header + events) of each view handed out by {@link makePorts},
+ * retained so the seeded cold-fork path can slice the real `SessionEvent`
+ * objects and resolve the source's recorded preset. (The view itself only
+ * promises `{ seq, type }` + cwd to keep boundary logic testable.)
  */
-const seedEvents = new WeakMap<SourceSessionView, readonly SessionEvent[]>()
+interface SourceLog {
+  readonly header: SessionHeader
+  readonly events: readonly SessionEvent[]
+}
+
+const sourceLogs = new WeakMap<SourceSessionView, SourceLog>()
+
+/**
+ * The preset a session actually runs, newest selection winning (upstream:
+ * `resolveSessionPreset` from @deepseek-ai/dsh-agent-presets, mirrored here
+ * so the plugin's runtime dependency set stays `zod`-only). The header
+ * supplies the creation-time value; every later selection is a logged
+ * `agent-preset/selected` event, so the last one is the answer.
+ */
+function resolveSessionPreset(log: SourceLog): string | undefined {
+  for (let index = log.events.length - 1; index >= 0; index -= 1) {
+    const event = log.events[index]
+    // The preset-selection event is an open-vocabulary type dsh-session's
+    // closed union does not name, hence the narrow structural cast.
+    if (event !== undefined && (event.type as string) === 'agent-preset/selected') {
+      return (event as unknown as { data: { agentPreset?: string } }).data.agentPreset
+    }
+  }
+  return log.header.agentPreset
+}
+
+/** Structural slice of `ctx.get('agentPresets')` this plugin relies on. */
+interface AgentPresetsLike {
+  resolve(id?: string): Promise<{ id: string }>
+  mount(agentCtx: Context, id?: string): Promise<unknown>
+}
+
+/** Structural slice of `ctx.get('workspaceRegistry')` workspaces relied on. */
+interface WorkspaceLike {
+  readonly id: string
+  readonly sessionIds: readonly string[]
+  attachSession(sessionId: string): Promise<unknown>
+}
+
+/** Structural slice of `ctx.get('sessionQuery')` relied on. */
+interface SessionQueryLike {
+  traceSession(sessionId: string): Promise<{ ancestors: ReadonlyArray<{ header: { id: string } }> }>
+}
+
+/**
+ * Resolve the Workspace a fork's child should join — api-proxy's
+ * `forkWorkspace`: the source's direct Workspace, or for a subagent source
+ * (not listed directly) the nearest owning ancestor. `undefined` when no
+ * workspace registry is mounted or nothing owns the lineage.
+ */
+async function forkWorkspaceOf(
+  ctx: Context,
+  source: SourceSessionView,
+  log: SourceLog | undefined,
+): Promise<WorkspaceLike | undefined> {
+  const registry = ctx.get('workspaceRegistry') as
+    | { list(): WorkspaceLike[] }
+    | undefined
+  if (registry === undefined) return undefined
+  const workspaces = registry.list()
+  const direct = workspaces.find(workspace => workspace.sessionIds.includes(source.id))
+  if (direct !== undefined || log?.header.origin !== 'subagent') return direct
+  const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
+  if (query === undefined) return undefined
+  const lineage = await query.traceSession(source.id)
+  for (const ancestor of lineage.ancestors) {
+    const workspace = workspaces.find(candidate =>
+      candidate.sessionIds.includes(ancestor.header.id),
+    )
+    if (workspace !== undefined) return workspace
+  }
+  return undefined
+}
 
 /** Build the fork ports over live-first session reads. */
 function makePorts(ctx: Context): BranchPorts {
@@ -79,7 +151,7 @@ function makePorts(ctx: Context): BranchPorts {
           events,
           header: live.header.cwd === undefined ? {} : { cwd: live.header.cwd },
         }
-        seedEvents.set(view, events)
+        sourceLogs.set(view, { header: live.header, events })
         return view
       }
       // Cold path: persistence inspect, like api-proxy's readSessionState.
@@ -92,7 +164,7 @@ function makePorts(ctx: Context): BranchPorts {
           events: [...inspected.events],
           header: inspected.meta.cwd === undefined ? {} : { cwd: inspected.meta.cwd },
         }
-        seedEvents.set(view, inspected.events)
+        sourceLogs.set(view, { header: inspected.meta, events: inspected.events })
         return view
       } catch (error) {
         ctx.logger.debug(
@@ -109,7 +181,27 @@ function makePorts(ctx: Context): BranchPorts {
       return true
     },
     async createChildFromSeed(childId, source, cut) {
-      const events = seedEvents.get(source) ?? []
+      const log = sourceLogs.get(source)
+      const events = log?.events ?? []
+      // Mirror api-proxy's session.fork composition: the child inherits the
+      // source's recorded preset (its seeded history was produced under that
+      // composition) and joins the source's workspace. Without the preset the
+      // child would carry tool calls it can no longer compose.
+      const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+      const presetId = log === undefined ? undefined : resolveSessionPreset(log)
+      let agentPreset: string | undefined
+      let setup: ((agentCtx: Context) => Promise<void>) | undefined
+      if (presets !== undefined && presetId !== undefined) {
+        agentPreset = (await presets.resolve(presetId)).id
+        const resolvedId = agentPreset
+        setup = async (agentCtx: Context) => {
+          await presets.mount(agentCtx, resolvedId)
+        }
+      }
+      // Seed the same default model selection the host's entry points use.
+      const defaultModel = ctx.get('agentDefaultModel') as
+        | { currentSelection(): { provider: string; model: string } }
+        | undefined
       await ctx.agents.create({
         sessionId: childId as Session['id'],
         seed: events.slice(0, cut),
@@ -117,8 +209,21 @@ function makePorts(ctx: Context): BranchPorts {
           ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
           parentSession: source.id as Session['id'],
           seedLength: cut,
+          ...(agentPreset === undefined ? {} : { agentPreset }),
         },
+        ...(defaultModel === undefined ? {} : { agentOptions: defaultModel.currentSelection() }),
+        ...(setup === undefined ? {} : { setup }),
       })
+      // Best-effort workspace attach, like api-proxy: the child is already
+      // published, an attach failure must not lose it.
+      try {
+        const workspace = await forkWorkspaceOf(ctx, source, log)
+        await workspace?.attachSession(childId)
+      } catch (error) {
+        ctx.logger.warn(
+          `dsh-fork: forked session "${childId}" could not attach to its workspace: ${String(error)}`,
+        )
+      }
     },
   }
 }

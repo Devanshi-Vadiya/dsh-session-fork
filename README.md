@@ -5,7 +5,8 @@ Git-style conversation branching for [DeepSeek Harness](https://github.com/deeps
 ## Features (v0.0.1 — ref layer)
 
 - Named branches that persist across dsh restarts (storage-domain backed, one registry per workspace cwd).
-- `/branch <name>` — fork the current session at its last completed turn and record the ref, including the exact fork anchor in the parent log.
+- `/branch <name>` — fork the current session at its last completed turn and record the ref, including the exact fork anchor in the parent log. Cold (non-live) sources are forked too, with the same agent preset composition and workspace attachment the Web GUI's fork applies.
+- `/branch adopt <name>` — adopt the current session as the workspace's root branch (no fork).
 - `/branch list` — list this workspace's branches; refs whose session was deleted are marked `[dangling]`.
 - `/branch rm <name> --yes` — remove a branch ref (session data is never deleted).
 - `/branch rename <old> <new>` — rename a ref, with duplicate-name guards.
@@ -32,6 +33,14 @@ Branch 'review' → session session-3f9c…a1 (forked from session-8b2d…77 at 
 ```
 
 The anchor `atSeq` is the parent log's anchoring `turn/end` event seq — it locates the exact fork message in the parent session.
+
+```
+/branch adopt main
+```
+
+```
+Branch 'main' → session session-8b2d…77 (root branch, adopted the current session).
+```
 
 ```
 /branch list

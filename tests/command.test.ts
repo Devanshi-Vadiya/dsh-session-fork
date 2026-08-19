@@ -199,6 +199,43 @@ describe('executeBranchAction', () => {
     if (result.kind === 'success') expect(result.text).toContain('No branches')
   })
 
+  test('adopt registers the current session as the root branch', async () => {
+    const h = harness()
+    const result = await executeBranchAction(parseBranchAction('adopt main'), h.deps)
+    expect(result.kind).toBe('success')
+    if (result.kind === 'success') expect(result.text).toContain('root branch')
+    const record = h.store.dump()!.branches['main']!
+    expect(record.sessionId).toBe('s-parent')
+    expect(record.forkOrigin).toBeNull()
+    // Adopting never forks: no child session was created.
+    expect(h.children).toHaveLength(0)
+  })
+
+  test('adopt with a duplicate name is a clear error', async () => {
+    const h = harness()
+    await executeBranchAction(parseBranchAction('adopt main'), h.deps)
+    const result = await executeBranchAction(parseBranchAction('adopt main'), h.deps)
+    expect(result.kind).toBe('error')
+    if (result.kind === 'error') expect(result.text).toContain('already exists')
+  })
+
+  test('adopt of a missing session is a clear error', async () => {
+    const h = harness()
+    h.deps = { ...h.deps, currentSessionId: 'ghost' }
+    const result = await executeBranchAction(parseBranchAction('adopt main'), h.deps)
+    expect(result.kind).toBe('error')
+    if (result.kind === 'error') expect(result.text).toContain('ghost')
+    expect(h.store.dump()).toBeNull()
+  })
+
+  test('adopt parses strictly', () => {
+    expect(parseBranchAction('adopt')).toEqual({
+      kind: 'usage',
+      problem: `'adopt' takes exactly one branch name`,
+    })
+    expect(parseBranchAction('adopt a b').kind).toBe('usage')
+  })
+
   test('rm without --yes refuses; with --yes removes only the ref', async () => {
     const h = harness()
     await executeBranchAction(parseBranchAction('review'), h.deps)
