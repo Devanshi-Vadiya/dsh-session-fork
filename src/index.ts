@@ -16,7 +16,7 @@ import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-sess
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { BranchPorts, SourceSessionView } from './branch.js'
 import { executeBranchAction, parseBranchAction } from './command.js'
-import { createDomainStore, dshForkDomainSpec, legacyForkDomainSpec, migrateLegacyDomain } from './store.js'
+import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { composeAgent, forkWorkspace } from './vendor/fork.js'
 import type { AgentPresetsLike, WorkspaceLike } from './vendor/fork.js'
@@ -218,27 +218,6 @@ export const branchCommandDefinition = {
  */
 export async function apply(ctx: Context): Promise<void> {
   const domain = await ctx.storageDomain.open(dshForkDomainSpec)
-  // [rename-migration] removable at v0.1.0: copy any pre-rename `dsh_fork`
-  // records into the new domain exactly once (only when the new domain is
-  // untouched). The legacy domain is opened through the same formal
-  // storage-domain API — same facility, same backend — and always closed.
-  // A migration failure never blocks startup: the worst case is a fresh
-  // empty registry, which is what every pre-rename install had anyway.
-  try {
-    const migrated = await migrateLegacyDomain(
-      domain as unknown as DomainLike,
-      () => ctx.storageDomain.open(legacyForkDomainSpec) as unknown as Promise<DomainLike>,
-    )
-    if (migrated > 0) {
-      ctx.logger.info(
-        `dsh-session-fork: migrated ${migrated} workspace record(s) from the legacy 'dsh_fork' storage domain`,
-      )
-    }
-  } catch (error) {
-    ctx.logger.warn(
-      `dsh-session-fork: legacy storage-domain migration skipped: ${String(error)}`,
-    )
-  }
   const active = new Set<Promise<CommandResult>>()
 
   ctx.effect(function* () {
