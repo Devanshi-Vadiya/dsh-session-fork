@@ -118,3 +118,27 @@ describe('vendor marker integrity', () => {
     expect(source).toContain('99f6f02fecdb7dff40c3fbc9470f5907c29f74ca')
   })
 })
+
+describe('vendored session-title limit integrity', () => {
+  const source = readFileSync(new URL('../src/vendor/session-title-limit.ts', import.meta.url), 'utf8')
+  // Only inline code-comment markers count; the file-header policy blurb
+  // mentions the markers by name and must not.
+  const markers = (kind: string): number =>
+    source.match(new RegExp(`^\\s*// \\[fork:${kind}\\]`, 'gm'))?.length ?? 0
+
+  test('exactly one [fork:adapt] marker and no surgery', () => {
+    expect(markers('adapt')).toBe(1)
+    expect(markers('surgery')).toBe(0)
+  })
+
+  test('records the upstream commit SHA and the exact YAML source', () => {
+    expect(source).toContain('99f6f02fecdb7dff40c3fbc9470f5907c29f74ca')
+    expect(source).toContain('packages/bundle/base/cordis.patch.yml:39-44')
+  })
+
+  test('pins the vendored byte budget to upstream maxTitleBytes', () => {
+    // The deployed SessionTitleService enforces this exact budget on
+    // session.rename; the registry gate must stay in lockstep with it.
+    expect(source).toMatch(/export const upstreamMaxTitleBytes = 80\n/)
+  })
+})

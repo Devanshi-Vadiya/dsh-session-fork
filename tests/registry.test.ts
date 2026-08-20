@@ -82,6 +82,41 @@ describe('createBranch', () => {
       expect((error as BranchRegistryError).code).toBe('invalid-name')
     }
   })
+
+  test.each([
+    'main',
+    'feature-x',
+    'my branch',
+    `${'汉'.repeat(26)}ab`, // exactly 80 UTF-8 bytes: fits the official budget
+  ])('valid name %p passes the gate', (name) => {
+    expect(() => createBranch(emptyState(), rootBranch(name, 's1'))).not.toThrow()
+  })
+
+  test.each([
+    ['a  b', 'doubled whitespace'],
+    ['a\tb', 'internal tab'],
+    ['a\u200Bb', 'zero-width space'],
+    ['\u202Eabc', 'directional override'],
+    ['\u001B]0;x\u0007y', 'terminal escape sequence'],
+    [`${'汉'.repeat(27)}`, '81 UTF-8 bytes'],
+  ])('name that the official normalizer would rewrite fails: %s', (name, _label) => {
+    try {
+      createBranch(emptyState(), rootBranch(name, 's1'))
+      expect.unreachable()
+    } catch (error) {
+      expect((error as BranchRegistryError).code).toBe('invalid-name')
+    }
+  })
+
+  test('over-budget name reports the official byte limit', () => {
+    try {
+      createBranch(emptyState(), rootBranch(`${'汉'.repeat(27)}`, 's1'))
+      expect.unreachable()
+    } catch (error) {
+      expect((error as BranchRegistryError).code).toBe('invalid-name')
+      expect((error as Error).message).toContain('80')
+    }
+  })
 })
 
 describe('assertBranchNameFree', () => {

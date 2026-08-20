@@ -15,12 +15,9 @@ import {
 import type { BranchPorts } from '../src/branch.js'
 import { anchoredBoundaryOf } from '../src/vendor/fork.js'
 
-interface Call {
-  readonly kind: 'createChildFromSeed'
-  readonly sourceId: string
-  readonly cut: number
-  readonly childId: string
-}
+type Call =
+  | { readonly kind: 'createChildFromSeed'; readonly sourceId: string; readonly cut: number; readonly childId: string }
+  | { readonly kind: 'renameSession'; readonly sessionId: string; readonly title: string }
 
 /** Build a fake source log from a compact event-type list. */
 function sessionOf(id: string, types: readonly string[]): SourceSessionView {
@@ -29,9 +26,9 @@ function sessionOf(id: string, types: readonly string[]): SourceSessionView {
 }
 
 /**
- * Fake ports recording every child-creation call. There is exactly one
- * production route — the seeded `agents.create` path — for live and cold
- * sources alike, so the fake needs no liveness scripting.
+ * Fake ports recording every child-creation and rename call. There is
+ * exactly one production route — the seeded `agents.create` path — for live
+ * and cold sources alike, so the fake needs no liveness scripting.
  */
 function portsOf(sessions: readonly SourceSessionView[]): BranchPorts & { calls: readonly Call[] } {
   const calls: Call[] = []
@@ -47,6 +44,9 @@ function portsOf(sessions: readonly SourceSessionView[]): BranchPorts & { calls:
         cut,
         childId,
       })
+    },
+    async renameSession(sessionId, title) {
+      calls.push({ kind: 'renameSession', sessionId, title })
     },
   }
 }
@@ -126,8 +126,32 @@ describe('createBranchFrom', () => {
     expect(cold.forkOrigin).toEqual({ parentSessionId: 'parent', atSeq: 8 })
     expect(ports.calls).toEqual([
       { kind: 'createChildFromSeed', sourceId: 'parent', cut: 9, childId: 'child-1' },
+      { kind: 'renameSession', sessionId: 'child-1', title: 'review' },
       { kind: 'createChildFromSeed', sourceId: 'parent', cut: 9, childId: 'child-2' },
+      { kind: 'renameSession', sessionId: 'child-2', title: 'review-2' },
     ])
+  })
+
+  test('rename runs only after the child exists, pinning the branch name as its title', async () => {
+    // Issue #7 order lock: create-then-rename, never rename-then-create
+    // (the rename targets a session the fork just produced).
+    const ports = portsOf([sessionOf('parent', log)])
+    await createBranchFrom('parent', 'feature', ports, { childId: 'child-1' })
+    expect(ports.calls.map(c => c.kind)).toEqual(['createChildFromSeed', 'renameSession'])
+  })
+
+  test('a rejected rename surfaces as rename-failed and yields no record', async () => {
+    const ports = portsOf([sessionOf('parent', log)])
+    ports.renameSession = async () => {
+      throw new BranchForkError('rename-failed', 'session rename rejected: internal: boom')
+    }
+    try {
+      await createBranchFrom('parent', 'x', ports, { childId: 'child-1' })
+      expect.unreachable()
+    } catch (error) {
+      expect(error).toBeInstanceOf(BranchForkError)
+      expect((error as BranchForkError).code).toBe('rename-failed')
+    }
   })
 
   test('record is frozen and carries the anchoring turn/end', async () => {
@@ -183,7 +207,7 @@ describe('createBranchFrom', () => {
 })
 
 describe('createRootBranch', () => {
-  test('adopts an existing session with forkOrigin null', async () => {
+  test('adopts an existing session with forkOrigin null and renames it in place', async () => {
     const ports = portsOf([sessionOf('s1', ['turn/end'])])
     const record = await createRootBranch('s1', 'main', ports)
     expect(record).toEqual({
@@ -193,9 +217,11 @@ describe('createRootBranch', () => {
       createdAt: record.createdAt,
     })
     expect(Object.isFrozen(record)).toBe(true)
+    // Issue #7: adopting pins the branch name as the session's title.
+    expect(ports.calls).toEqual([{ kind: 'renameSession', sessionId: 's1', title: 'main' }])
   })
 
-  test('missing session fails with typed error', async () => {
+  test('missing session fails with typed error before any rename', async () => {
     const ports = portsOf([])
     try {
       await createRootBranch('ghost', 'main', ports)
@@ -204,5 +230,6 @@ describe('createRootBranch', () => {
       expect(error).toBeInstanceOf(BranchForkError)
       expect((error as BranchForkError).code).toBe('source-not-found')
     }
+    expect(ports.calls).toEqual([])
   })
 })

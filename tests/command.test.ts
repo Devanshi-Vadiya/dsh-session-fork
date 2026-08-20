@@ -12,6 +12,7 @@ import {
 } from '../src/command.js'
 import type { BranchCommandDeps } from '../src/command.js'
 import type { SourceEvent, SourceSessionView } from '../src/branch.js'
+import { BranchForkError } from '../src/branch.js'
 import type { RegistryState, RegistryStore } from '../src/types.js'
 
 const LOG: readonly string[] = [
@@ -50,14 +51,17 @@ interface Harness {
   readonly deps: BranchCommandDeps
   readonly store: ReturnType<typeof memoryStore>
   readonly children: string[]
+  readonly renames: Array<{ sessionId: string; title: string }>
 }
 
 function harness(): Harness {
   const store = memoryStore()
   const children: string[] = []
+  const renames: Array<{ sessionId: string; title: string }> = []
   return {
     store,
     children,
+    renames,
     deps: {
       currentSessionId: 's-parent',
       store,
@@ -72,6 +76,9 @@ function harness(): Harness {
         },
         async createChildFromSeed(childId) {
           children.push(childId)
+        },
+        async renameSession(sessionId, title) {
+          renames.push({ sessionId, title })
         },
       },
     },
@@ -125,6 +132,9 @@ describe('executeBranchAction', () => {
       expect(result.text).toContain('(turn end)')
     }
     expect(h.children).toHaveLength(1)
+    // Issue #7: the fork is followed by an in-place rename pinning the
+    // branch name as the child's title.
+    expect(h.renames).toEqual([{ sessionId: h.children[0], title: 'review' }])
     const state = h.store.dump()
     expect(state!.branches['review']!.forkOrigin).toEqual({
       parentSessionId: 's-parent',
@@ -150,6 +160,30 @@ describe('executeBranchAction', () => {
     // The name pre-check runs ahead of the fork, so no second child is
     // spawned for a name that can never be registered.
     expect(h.children).toHaveLength(before)
+  })
+
+  test('rename rejection after fork surfaces as an error without a registry write', async () => {
+    const h = harness()
+    h.deps = {
+      ...h.deps,
+      ports: {
+        ...h.deps.ports,
+        async renameSession() {
+          throw new BranchForkError(
+            'rename-failed',
+            'session rename rejected: title-invalid: session title must contain visible characters',
+          )
+        },
+      },
+    }
+    const result = await executeBranchAction(parseBranchAction('review'), h.deps)
+    expect(result.kind).toBe('error')
+    if (result.kind === 'error') expect(result.text).toContain('title-invalid')
+    // The fork already happened (the child stays listed as an anonymous
+    // session), but no ref is written for a name whose title could not be
+    // pinned — the registry gate makes this path an internal anomaly only.
+    expect(h.children).toHaveLength(1)
+    expect(h.store.dump()).toBeNull()
   })
 
   test('invalid name fails before forking', async () => {
@@ -222,6 +256,8 @@ describe('executeBranchAction', () => {
     expect(record.forkOrigin).toBeNull()
     // Adopting never forks: no child session was created.
     expect(h.children).toHaveLength(0)
+    // The adopted session is renamed in place to the branch name.
+    expect(h.renames).toEqual([{ sessionId: 's-parent', title: 'main' }])
   })
 
   test('adopt with a duplicate name is a clear error', async () => {

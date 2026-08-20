@@ -10,6 +10,7 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { normalizeSessionTitle, truncateTitleUtf8 } from '@deepseek-ai/dsh-session-title'
 import type {
   BranchListing,
   BranchRecord,
@@ -17,6 +18,7 @@ import type {
   RegistryStore,
   SessionExists,
 } from './types.js'
+import { upstreamMaxTitleBytes } from './vendor/session-title-limit.js'
 
 /** Typed failure of one registry operation. */
 export class BranchRegistryError extends Error {
@@ -31,17 +33,39 @@ export class BranchRegistryError extends Error {
 }
 
 /**
- * Reject names that are empty, whitespace-padded, or contain control chars.
+ * Reject branch names the official session-title pipeline would rewrite.
  *
- * Design decision, not a TODO: a branch name is the registry's record key,
- * so this minimal validation protects key integrity — empty, padded, or
- * control-char names would break lookup, listing, and durable round-trips.
- * The official fork has no name concept at all, so there is no upstream
- * rule to follow and nothing to loosen this to.
+ * A branch name is the registry's record key AND — since issue #7 — the
+ * exact title `/branch create` and `/branch adopt` write onto the session
+ * through the official `session.rename` handler. That handler accepts its
+ * input by *normalizing* it (strips terminal/control/invisible characters,
+ * collapses whitespace runs, trims, truncates to the deployment's UTF-8
+ * byte budget), so a name it would rewrite would produce a session title
+ * that differs from the registry key. The gate is therefore the official
+ * normalizer itself, held to identity: a name passes only when the official
+ * pipeline returns it byte-for-byte unchanged. Passing the gate makes the
+ * later rename deterministic — it must accept the title and store exactly
+ * this name.
+ *
+ * The empty check stays ours: the empty string survives normalization as
+ * itself, so identity alone would admit it (the official handler rejects
+ * it, but the gate must fail fast before any fork side effect).
  */
 function assertValidName(name: string): void {
-  if (name.length === 0 || name.trim() !== name || /[\u0000-\u001f\u007f]/.test(name)) {
-    throw new BranchRegistryError('invalid-name', `invalid branch name: ${JSON.stringify(name)}`)
+  if (name.length === 0) {
+    throw new BranchRegistryError('invalid-name', 'name must not be empty')
+  }
+  if (truncateTitleUtf8(name, upstreamMaxTitleBytes) !== name) {
+    throw new BranchRegistryError(
+      'invalid-name',
+      `exceeds ${String(upstreamMaxTitleBytes)} UTF-8 bytes (the official session-title budget)`,
+    )
+  }
+  if (normalizeSessionTitle(name, upstreamMaxTitleBytes) !== name) {
+    throw new BranchRegistryError(
+      'invalid-name',
+      'must not contain leading/trailing or doubled whitespace, control characters, or invisible characters',
+    )
   }
 }
 

@@ -1,6 +1,7 @@
 /**
- * Branch creation: seed a child session through the official agent path and
- * record the ref.
+ * Branch creation: seed a child session through the official agent path,
+ * pin the branch name as the session title through the official
+ * `session.rename` handler, and record the ref.
  * @module dsh-session-fork/src/branch
  *
  * A single durable route mirrors the host web GUI's own fork
@@ -28,7 +29,7 @@ import { anchoredBoundaryOf } from './vendor/fork.js'
 /** Typed failure of a branch-creation operation. */
 export class BranchForkError extends Error {
   /** Machine-readable failure code. */
-  readonly code: 'source-not-found' | 'fork-unavailable'
+  readonly code: 'source-not-found' | 'fork-unavailable' | 'rename-failed'
 
   constructor(code: BranchForkError['code'], message: string) {
     super(message)
@@ -63,6 +64,11 @@ export interface SourceSessionView {
  *   with `meta.parentSession`/`seedLength` plus workspace attach, the exact
  *   path the web GUI's fork button takes. Used for live and cold sources
  *   alike.
+ * - `renameSession` — the official `session.rename` handler through the
+ *   injected `ctx.apiProxy` gateway, in process (same instance the web GUI's
+ *   rename dialog drives). Called only after the registry gate
+ *   (`assertValidName`) has proved the official normalizer holds the title
+ *   to identity, so the rename is deterministic.
  */
 export interface BranchPorts {
   readSession(sessionId: string): Promise<SourceSessionView | null>
@@ -71,6 +77,7 @@ export interface BranchPorts {
     source: SourceSessionView,
     cut: number,
   ): Promise<void>
+  renameSession(sessionId: string, title: string): Promise<void>
 }
 
 /** Options for {@link createBranchFrom}. */
@@ -125,6 +132,12 @@ export async function createBranchFrom(
   // exactly what the web GUI's fork does (api-proxy session.fork), and it
   // is the only path that produces a durable, workspace-listed child.
   await ports.createChildFromSeed(childId, source, boundary.cut)
+  // Issue #7: the branch name becomes the child's pinned title through the
+  // official session.rename handler. The registry gate already proved the
+  // official normalizer holds this name to identity, so this rename is
+  // deterministic; a failure here is an internal anomaly that must surface
+  // (the child stays listed like any anonymous fork, without a ref).
+  await ports.renameSession(childId, name)
   return Object.freeze({
     name,
     sessionId: childId,
@@ -137,14 +150,17 @@ export async function createBranchFrom(
 }
 
 /**
- * Adopt `sessionId` as a workspace's root branch (`forkOrigin: null`).
+ * Adopt `sessionId` as a workspace's root branch (`forkOrigin: null`), and
+ * pin the branch name as the session's title through the official
+ * `session.rename` handler (same deterministic gate as
+ * {@link createBranchFrom}).
  * @throws {@link BranchForkError} `source-not-found` when the session does
- * not exist (live or on disk).
+ * not exist (live or on disk), `rename-failed` when the rename is rejected.
  */
 export async function createRootBranch(
   sessionId: string,
   name: string,
-  ports: Pick<BranchPorts, 'readSession'>,
+  ports: Pick<BranchPorts, 'readSession' | 'renameSession'>,
 ): Promise<BranchRecord> {
   const source = await ports.readSession(sessionId)
   if (source === null) {
@@ -153,6 +169,7 @@ export async function createRootBranch(
       `no session named '${sessionId}' exists`,
     )
   }
+  await ports.renameSession(sessionId, name)
   return Object.freeze({
     name,
     sessionId,

@@ -15,6 +15,7 @@ import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-sess
 // (`ctx.sessionPersistence`) without any runtime dependency on it.
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { BranchPorts, SourceSessionView } from './branch.js'
+import { BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction } from './command.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
@@ -60,7 +61,7 @@ export type { DomainLike } from './store.js'
 export const name = 'dsh-session-fork'
 
 /** Host services this plugin needs; the web-app bundle provides all. */
-export const inject = ['commands', 'storageDomain', 'sessions', 'sessionPersistence', 'agents']
+export const inject = ['commands', 'storageDomain', 'sessions', 'sessionPersistence', 'agents', 'apiProxy']
 
 /**
  * Full log (header + events) of each view handed out by {@link makePorts},
@@ -88,6 +89,22 @@ interface WorkspaceRegistryLike {
 /** Structural slice of `ctx.get('sessionQuery')` relied on. */
 interface SessionQueryLike {
   traceSession(sessionId: string): Promise<{ ancestors: ReadonlyArray<{ header: { id: string } }> }>
+}
+
+/**
+ * Structural slice of `ctx.apiProxy.sessions` relied on: the official
+ * `session.rename` handler only. Calling it in-process drives the same
+ * gateway instance (and the same SessionTitleService behind it) as the web
+ * GUI's rename dialog; the result is the standard RPC shape —
+ * `result.ok` true with `{ title, seq }`, or false with a coded error.
+ */
+interface ApiProxySessionsLike {
+  rename(request: {
+    rpcId: string
+    payload: { sessionId: Session['id']; title: string }
+  }): Promise<{
+    result: { ok: boolean; value?: { title: string; seq: number }; error?: { code: string; message: string } }
+  }>
 }
 
 /** Build the fork ports over live-first session reads. */
@@ -180,6 +197,31 @@ function makePorts(ctx: Context): BranchPorts {
       // Attach failures are surfaced, not swallowed: an unattached child is
       // real but invisible in its workspace, which the user must hear about.
       await workspace?.attachSession(childId)
+    },
+    async renameSession(sessionId, title) {
+      // The official rename handler, in process. The registry gate has
+      // already proved the official normalizer holds this title to
+      // identity, so an error result here is an internal anomaly — map it
+      // onto BranchForkError so the command layer renders it like every
+      // other branch-operation failure.
+      const api = (ctx.get('apiProxy') as { sessions?: ApiProxySessionsLike } | undefined)?.sessions
+      if (api === undefined) {
+        throw new BranchForkError(
+          'rename-failed',
+          'the api-proxy gateway is not mounted in this deployment',
+        )
+      }
+      const response = await api.rename({
+        rpcId: `dsh-session-fork:rename:${sessionId}`,
+        payload: { sessionId: sessionId as Session['id'], title },
+      })
+      if (!response.result.ok) {
+        const error = response.result.error
+        throw new BranchForkError(
+          'rename-failed',
+          `session rename rejected: ${error?.code ?? 'unknown'}: ${error?.message ?? 'no message'}`,
+        )
+      }
     },
   }
 }
