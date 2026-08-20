@@ -3,7 +3,7 @@
  * rendering. Pure and cordis-free: the plugin shell in `index.ts` feeds an
  * action plus {@link BranchCommandDeps}; everything here is unit-testable
  * with fakes.
- * @module dsh-fork/src/command
+ * @module dsh-session-fork/src/command
  */
 
 import type { BranchPorts } from './branch.js'
@@ -28,9 +28,6 @@ import {
 export type BranchCommandResult =
   | { readonly kind: 'success'; readonly text?: string }
   | { readonly kind: 'error'; readonly text: string }
-
-/** Subcommands that can never be a plain branch name. */
-const SUBCOMMANDS = new Set(['list', 'rm', 'rename', 'create', 'adopt', 'help'])
 
 export const BRANCH_USAGE = [
   'Usage:',
@@ -205,10 +202,10 @@ export async function executeBranchAction(
     }
 
     case 'rm': {
+      let state = await loadRegistry(deps.store)
       if (!action.confirmed) {
-        const target = await loadRegistry(deps.store)
         try {
-          const record = getBranch(target, action.name)
+          const record = getBranch(state, action.name)
           return {
             kind: 'error',
             text: `Refusing to remove branch '${action.name}' (points at ${record.sessionId}). Re-run with --yes to remove the ref. Session data is never deleted.`,
@@ -217,7 +214,6 @@ export async function executeBranchAction(
           return { kind: 'error', text: branchErrorMessage(new BranchLookupFailure(action.name)) }
         }
       }
-      let state = await loadRegistry(deps.store)
       try {
         state = removeBranch(state, action.name)
       } catch (error) {
@@ -240,7 +236,9 @@ export async function executeBranchAction(
   }
 }
 
-/** Local mirror of the unknown-branch message; avoids re-implementing lookup. */
+/** Local mirror of the unknown-branch message; avoids re-implementing lookup.
+ * Used only for 'rm' without confirmation, we need to check the branch exists.
+ */
 class BranchLookupFailure extends BranchRegistryError {
   constructor(name: string) {
     super('unknown-branch', `no branch named '${name}'`)

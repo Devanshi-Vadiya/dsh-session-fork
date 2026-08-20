@@ -1,6 +1,6 @@
 /**
  * Branch registry core: pure state transforms plus a persistence seam.
- * @module dsh-fork/src/registry
+ * @module dsh-session-fork/src/registry
  *
  * All mutating functions are copy-on-write: they return a new frozen
  * {@link RegistryState} and never modify their input. Persistence goes
@@ -30,7 +30,15 @@ export class BranchRegistryError extends Error {
   }
 }
 
-/** Reject names that are empty, whitespace-padded, or contain control chars. */
+/**
+ * Reject names that are empty, whitespace-padded, or contain control chars.
+ *
+ * Design decision, not a TODO: a branch name is the registry's record key,
+ * so this minimal validation protects key integrity — empty, padded, or
+ * control-char names would break lookup, listing, and durable round-trips.
+ * The official fork has no name concept at all, so there is no upstream
+ * rule to follow and nothing to loosen this to.
+ */
 function assertValidName(name: string): void {
   if (name.length === 0 || name.trim() !== name || /[\u0000-\u001f\u007f]/.test(name)) {
     throw new BranchRegistryError('invalid-name', `invalid branch name: ${JSON.stringify(name)}`)
@@ -77,13 +85,7 @@ export function assertBranchNameFree(state: RegistryState, name: string): void {
 
 /** Register a new branch ref. Fails on invalid or duplicate names. */
 export function createBranch(state: RegistryState, input: CreateBranchInput): RegistryState {
-  assertValidName(input.name)
-  if (state.branches[input.name] !== undefined) {
-    throw new BranchRegistryError(
-      'duplicate-name',
-      `a branch named '${input.name}' already exists`,
-    )
-  }
+  assertBranchNameFree(state, input.name)
   const record: BranchRecord = Object.freeze({
     name: input.name,
     sessionId: input.sessionId,

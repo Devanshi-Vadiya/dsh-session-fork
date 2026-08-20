@@ -1,6 +1,6 @@
 /**
- * dsh-fork: git-style conversation branching for DeepSeek Harness.
- * @module dsh-fork
+ * dsh-session-fork: git-style conversation branching for DeepSeek Harness.
+ * @module dsh-session-fork
  *
  * v0.0.1 (ref layer): a per-workspace branch registry persisted through the
  * storage-domain facility, plus the `/branch` command family. Host-side
@@ -16,7 +16,7 @@ import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-sess
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { BranchPorts, SourceSessionView } from './branch.js'
 import { executeBranchAction, parseBranchAction } from './command.js'
-import { createDomainStore, dshForkDomainSpec } from './store.js'
+import { createDomainStore, dshForkDomainSpec, legacyForkDomainSpec, migrateLegacyDomain } from './store.js'
 import type { DomainLike } from './store.js'
 import { composeAgent, forkWorkspace } from './vendor/fork.js'
 import type { AgentPresetsLike, WorkspaceLike } from './vendor/fork.js'
@@ -41,7 +41,6 @@ export {
   BranchForkError,
   createBranchFrom,
   createRootBranch,
-  forkBoundaryOf,
 } from './branch.js'
 export type {
   BranchPorts,
@@ -58,7 +57,7 @@ export type { BranchAction, BranchCommandResult } from './command.js'
 export { createDomainStore, dshForkDomainSpec } from './store.js'
 export type { DomainLike } from './store.js'
 
-export const name = 'dsh-fork'
+export const name = 'dsh-session-fork'
 
 /** Host services this plugin needs; the web-app bundle provides all. */
 export const inject = ['commands', 'storageDomain', 'sessions', 'sessionPersistence', 'agents']
@@ -120,7 +119,7 @@ function makePorts(ctx: Context): BranchPorts {
         return view
       } catch (error) {
         ctx.logger.debug(
-          `dsh-fork: inspect of session "${sessionId}" failed: ${String(error)}`,
+          `dsh-session-fork: inspect of session "${sessionId}" failed: ${String(error)}`,
         )
         return null
       }
@@ -132,7 +131,7 @@ function makePorts(ctx: Context): BranchPorts {
         // means a port caller fabricated a view — slicing a fabricated seed
         // would silently fork from nothing.
         throw new Error(
-          `dsh-fork invariant violation: no source log retained for session "${source.id}"`,
+          `dsh-session-fork invariant violation: no source log retained for session "${source.id}"`,
         )
       }
       const events = log.events
@@ -151,17 +150,17 @@ function makePorts(ctx: Context): BranchPorts {
       const workspace = registry === undefined
         ? undefined
         : await forkWorkspace(
-            {
-              listWorkspaces: () => registry.list(),
-              // Without the query service no ancestor lookup is possible;
-              // an ungrouped child is preferable to a failed fork.
-              traceSession: async id => query?.traceSession(id) ?? { ancestors: [] },
-            },
-            { id: source.id, header: log.header },
-          )
+          {
+            listWorkspaces: () => registry.list(),
+            // Without the query service no ancestor lookup is possible;
+            // an ungrouped child is preferable to a failed fork.
+            traceSession: async id => query?.traceSession(id) ?? { ancestors: [] },
+          },
+          { id: source.id, header: log.header },
+        )
       const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
       const forkComposition = await composeAgent(
-        { presets, installSelection: () => {} },
+        { presets, installSelection: () => { } },
         resolveSessionPreset(log),
       )
       // Seed the same default model selection the host's entry points use.
@@ -219,6 +218,27 @@ export const branchCommandDefinition = {
  */
 export async function apply(ctx: Context): Promise<void> {
   const domain = await ctx.storageDomain.open(dshForkDomainSpec)
+  // [rename-migration] removable at v0.1.0: copy any pre-rename `dsh_fork`
+  // records into the new domain exactly once (only when the new domain is
+  // untouched). The legacy domain is opened through the same formal
+  // storage-domain API — same facility, same backend — and always closed.
+  // A migration failure never blocks startup: the worst case is a fresh
+  // empty registry, which is what every pre-rename install had anyway.
+  try {
+    const migrated = await migrateLegacyDomain(
+      domain as unknown as DomainLike,
+      () => ctx.storageDomain.open(legacyForkDomainSpec) as unknown as Promise<DomainLike>,
+    )
+    if (migrated > 0) {
+      ctx.logger.info(
+        `dsh-session-fork: migrated ${migrated} workspace record(s) from the legacy 'dsh_fork' storage domain`,
+      )
+    }
+  } catch (error) {
+    ctx.logger.warn(
+      `dsh-session-fork: legacy storage-domain migration skipped: ${String(error)}`,
+    )
+  }
   const active = new Set<Promise<CommandResult>>()
 
   ctx.effect(function* () {
@@ -242,5 +262,5 @@ export async function apply(ctx: Context): Promise<void> {
     })
     yield async () => { await Promise.allSettled(active) }
     yield async () => { await domain.close() }
-  }, 'dsh-fork lifecycle')
+  }, 'dsh-session-fork lifecycle')
 }

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "dsh-fork",
+      "name": "dsh-session-fork",
       "dependencies": {
         "zod": "^4.4.3",
       },

@@ -1,5 +1,5 @@
 {
-  "name": "dsh-fork",
+  "name": "dsh-session-fork",
   "version": "0.0.1",
   "description": "dsh plugin: git-like conversation forking (branch refs on sessions)",
   "type": "module",

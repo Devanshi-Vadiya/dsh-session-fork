@@ -15,28 +15,17 @@
  * it is publicly exported by @deepseek-ai/dsh-agent-presets and imported
  * directly (optional peer dependency) — direct import beats copying.
  *
- * Vendor policy (dsh-fork vendor-replication standard): every deviation
+ * Vendor policy (dsh-session-fork vendor-replication standard): every deviation
  * from upstream carries exactly one marker —
  * - `[fork:adapt]`   mechanical adaptation, no semantic change (injected
  *   dependencies instead of closure capture, structural type slices, type
  *   import paths, plain Result returns instead of RPC envelopes);
  * - `[fork:surgery]` a semantic operation, with its reason inline.
  * `tests/vendor.test.ts` pins the marker counts.
- * @module dsh-fork/src/vendor/fork
+ * @module dsh-session-fork/src/vendor/fork
  */
 
 import type { SourceEvent } from '../branch.js'
-
-/**
- * The event fields the vendored fork helpers need beyond `{ seq, type }`:
- * command lifecycle pairing lives in event data.
- */
-// [fork:adapt] upstream reads the closed `SessionEvent` union; the vendor
-// copy stays decoupled from dsh-session by reading these fields
-// structurally (absent data = not that event kind).
-export interface VendoredSourceEvent extends SourceEvent {
-  readonly data?: unknown
-}
 
 /** Header fields the vendored helpers consume. */
 export interface VendoredSourceHeader {
@@ -189,7 +178,7 @@ export interface AnchoredBoundary {
  * @returns `null` when no completed turn anchors the fork.
  */
 export function anchoredBoundaryOf(
-  events: readonly VendoredSourceEvent[],
+  events: readonly SourceEvent[],
   atSeq?: number,
 ): AnchoredBoundary | null {
   // An in-log anchor belongs to the turn containing it and must never clip
@@ -224,21 +213,38 @@ export function anchoredBoundaryOf(
   // orphan. (Orphans can only trail the anchoring turn/end — a completed
   // turn pairs all runs inside it — so in practice this trims the tail
   // extension, never completed turns.)
-  const pairedDone = new Set(
-    events
-      .slice(0, cut)
-      .filter(e => e.type === 'command/done')
-      .map(e => (e.data as { commandId?: string } | undefined)?.commandId),
-  )
+  //
+  // Pairing is one single-pass sweep, parenthesis-matching per commandId:
+  // each `command/run` opens a slot for its id (count +1), each
+  // `command/done` closes the most recent open slot (count −1; a done with
+  // no open slot is ignored, so counts never go negative). `firstOpenAt`
+  // remembers where each id opened its earliest unmatched run. After the
+  // sweep a non-empty `openRuns` means orphan runs exist, and the cut backs
+  // up to before the earliest of them. Interleaved commands pair by id
+  // (runA runB doneA doneB is fully balanced; runA runB doneB leaves runA
+  // orphaned at its own index), which a whole-slice done-id set could not
+  // express.
+  const openRuns = new Map<string, number>()
+  const firstOpenAt = new Map<string, number>()
   for (let index = 0; index < cut; index += 1) {
     const event = events[index]
-    if (event?.type === 'command/run') {
-      const commandId = (event.data as { commandId?: string } | undefined)?.commandId
-      if (commandId !== undefined && !pairedDone.has(commandId)) {
-        cut = index
-        break
+    const commandId = (event?.data as { commandId?: string } | undefined)?.commandId
+    if (commandId === undefined || event === undefined) continue
+    if (event.type === 'command/run') {
+      if (!openRuns.has(commandId)) firstOpenAt.set(commandId, index)
+      openRuns.set(commandId, (openRuns.get(commandId) ?? 0) + 1)
+    } else if (event.type === 'command/done') {
+      const remaining = (openRuns.get(commandId) ?? 0) - 1
+      if (remaining > 0) {
+        openRuns.set(commandId, remaining)
+      } else {
+        openRuns.delete(commandId)
+        firstOpenAt.delete(commandId)
       }
     }
   }
+  let earliestOrphan = Infinity
+  for (const index of firstOpenAt.values()) earliestOrphan = Math.min(earliestOrphan, index)
+  if (Number.isFinite(earliestOrphan)) cut = earliestOrphan
   return { boundarySeq: boundary.seq, cut }
 }

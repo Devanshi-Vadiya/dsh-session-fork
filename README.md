@@ -1,6 +1,6 @@
-# dsh-fork
+# dsh-session-fork
 
-Git-style conversation branching for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh). dsh already has an anonymous session-fork primitive; dsh-fork adds the *git layer* on top: **named branch refs pointing at sessions**. Forking creates a child branch; later milestones will squash a child's conclusions back into the parent so ongoing phases see a clean summary instead of a full review transcript. Scope, milestones, and acceptance boundaries live in [docs/ROADMAP.md](docs/ROADMAP.md).
+Git-style conversation branching for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh). dsh already has an anonymous session-fork primitive; dsh-session-fork adds the *git layer* on top: **named branch refs pointing at sessions**. Forking creates a child branch; later milestones will squash a child's conclusions back into the parent so ongoing phases see a clean summary instead of a full review transcript. Scope, milestones, and acceptance boundaries live in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Features (v0.0.1 — ref layer)
 

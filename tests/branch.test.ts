@@ -2,7 +2,7 @@
  * Tests for branch creation: boundary anchoring, the single seeded-child
  * fork route (live and cold sources alike), root adoption, and
  * missing-source errors.
- * @module dsh-fork/tests/branch.test
+ * @module dsh-session-fork/tests/branch.test
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -11,9 +11,9 @@ import {
   BranchForkError,
   createBranchFrom,
   createRootBranch,
-  forkBoundaryOf,
 } from '../src/branch.js'
 import type { BranchPorts } from '../src/branch.js'
+import { anchoredBoundaryOf } from '../src/vendor/fork.js'
 
 interface Call {
   readonly kind: 'createChildFromSeed'
@@ -51,7 +51,7 @@ function portsOf(sessions: readonly SourceSessionView[]): BranchPorts & { calls:
   }
 }
 
-describe('forkBoundaryOf', () => {
+describe('anchoredBoundaryOf', () => {
   const log = [
     'turn/start',
     'message/user',
@@ -65,38 +65,38 @@ describe('forkBoundaryOf', () => {
   ]
 
   test('no anchor: last completed turn/end', () => {
-    expect(forkBoundaryOf(sessionOf('s', log).events)).toEqual({ turnEndSeq: 8, cut: 9 })
+    expect(anchoredBoundaryOf(sessionOf('s', log).events)).toEqual({ boundarySeq: 8, cut: 9 })
   })
 
   test('cut extends through trailing standalone events to the next turn/start', () => {
     const withTail = [...log, 'session/title', 'session/title']
-    expect(forkBoundaryOf(sessionOf('s', withTail).events)).toEqual({
-      turnEndSeq: 8,
+    expect(anchoredBoundaryOf(sessionOf('s', withTail).events)).toEqual({
+      boundarySeq: 8,
       cut: 11,
     })
   })
 
   test('in-log anchor resolves to the turn/end containing it', () => {
     // atSeq 1 lives inside the first turn; its turn/end is seq 3.
-    expect(forkBoundaryOf(sessionOf('s', log).events, 1)).toEqual({ turnEndSeq: 3, cut: 5 })
+    expect(anchoredBoundaryOf(sessionOf('s', log).events, 1)).toEqual({ boundarySeq: 3, cut: 5 })
   })
 
   test('anchor exactly on a turn/end uses that turn', () => {
-    expect(forkBoundaryOf(sessionOf('s', log).events, 3)).toEqual({ turnEndSeq: 3, cut: 5 })
+    expect(anchoredBoundaryOf(sessionOf('s', log).events, 3)).toEqual({ boundarySeq: 3, cut: 5 })
   })
 
   test('anchor inside an open (last) turn fails', () => {
     const openLog = [...log, 'turn/start', 'message/user']
-    expect(forkBoundaryOf(sessionOf('s', openLog).events, 10)).toBeNull()
+    expect(anchoredBoundaryOf(sessionOf('s', openLog).events, 10)).toBeNull()
   })
 
   test('no completed turn at all fails', () => {
-    expect(forkBoundaryOf(sessionOf('s', ['turn/start', 'message/user']).events)).toBeNull()
-    expect(forkBoundaryOf(sessionOf('s', []).events)).toBeNull()
+    expect(anchoredBoundaryOf(sessionOf('s', ['turn/start', 'message/user']).events)).toBeNull()
+    expect(anchoredBoundaryOf(sessionOf('s', []).events)).toBeNull()
   })
 
   test('past-end anchor falls back to the last completed turn', () => {
-    expect(forkBoundaryOf(sessionOf('s', log).events, 999)).toEqual({ turnEndSeq: 8, cut: 9 })
+    expect(anchoredBoundaryOf(sessionOf('s', log).events, 999)).toEqual({ boundarySeq: 8, cut: 9 })
   })
 })
 

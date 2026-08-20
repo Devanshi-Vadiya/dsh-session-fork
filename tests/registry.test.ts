@@ -1,7 +1,7 @@
 /**
- * Tests for the dsh-fork branch registry: pure transforms, typed errors,
+ * Tests for the dsh-session-fork branch registry: pure transforms, typed errors,
  * dangling marking, and persistence round-trips (memory + real file).
- * @module dsh-fork/tests/registry.test
+ * @module dsh-session-fork/tests/registry.test
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
@@ -224,7 +224,7 @@ describe('persistence', () => {
   })
 
   test('file store survives a restart via a real file path', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-fork-test-'))
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-session-fork-test-'))
     afterAll(() => {
       rm(dir, { recursive: true, force: true }).catch(() => {})
     })

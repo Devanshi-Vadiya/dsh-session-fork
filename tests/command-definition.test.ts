@@ -4,7 +4,7 @@
  * client's admission (ui-commands matchEnter) treats the command as
  * bare-only and `/branch main` would be sent as a normal message instead
  * of reaching the handler.
- * @module dsh-fork/tests/command-definition.test
+ * @module dsh-session-fork/tests/command-definition.test
  */
 
 import { describe, expect, test } from 'bun:test'

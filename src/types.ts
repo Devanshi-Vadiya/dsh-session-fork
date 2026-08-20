@@ -1,6 +1,6 @@
 /**
- * Public types of dsh-fork's branch registry.
- * @module dsh-fork/src/types
+ * Public types of dsh-session-fork's branch registry.
+ * @module dsh-session-fork/src/types
  */
 
 /** Where a branch was forked from, inside the parent session's event log. */

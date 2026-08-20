@@ -2,18 +2,16 @@
  * Tests for the vendored fork helpers: the seed-balance invariant (orphan
  * `command/run` must never enter a seed) and vendor-replication marker
  * integrity.
- * @module dsh-fork/tests/vendor.test
+ * @module dsh-session-fork/tests/vendor.test
  */
 
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { forkBoundaryOf } from '../src/branch.js'
 import type { SourceEvent } from '../src/branch.js'
 import { anchoredBoundaryOf } from '../src/vendor/fork.js'
-import type { VendoredSourceEvent } from '../src/vendor/fork.js'
 
 /** Build a fake event; `data` defaults to nothing. */
-function ev(seq: number, type: string, data?: unknown): SourceEvent & VendoredSourceEvent {
+function ev(seq: number, type: string, data?: unknown): SourceEvent {
   return data === undefined ? { seq, type } : { seq, type, data }
 }
 
@@ -34,7 +32,6 @@ describe('vendored seed-balance invariant', () => {
     // of extending through it, or the child renders the command as still
     // executing forever.
     expect(anchoredBoundaryOf(midCommand)).toEqual({ boundarySeq: 3, cut: 4 })
-    expect(forkBoundaryOf(midCommand)).toEqual({ turnEndSeq: 3, cut: 4 })
   })
 
   test('a paired command/run stays inside the seed', () => {
@@ -61,6 +58,45 @@ describe('vendored seed-balance invariant', () => {
     ]
     expect(anchoredBoundaryOf(plain)).toEqual({ boundarySeq: 1, cut: 3 })
   })
+
+  test('interleaved commands pair by id: runA runB doneA doneB is not an orphan', () => {
+    // The done for B arrives before A's own done — done-id set scanning
+    // still pairs correctly here, but the pairing must be per-id, so this
+    // case locks the balanced outcome for the stack sweep.
+    const interleaved = [
+      ev(0, 'turn/start'),
+      ev(1, 'turn/end'),
+      ev(2, 'command/run', { commandId: 'cmd-A' }),
+      ev(3, 'command/run', { commandId: 'cmd-B' }),
+      ev(4, 'command/done', { commandId: 'cmd-A', kind: 'success' }),
+      ev(5, 'command/done', { commandId: 'cmd-B', kind: 'success' }),
+    ]
+    expect(anchoredBoundaryOf(interleaved)).toEqual({ boundarySeq: 1, cut: 6 })
+  })
+
+  test('interleaved with a missing done: cut backs up to before the orphan run', () => {
+    const missingDoneA = [
+      ev(0, 'turn/start'),
+      ev(1, 'turn/end'),
+      ev(2, 'command/run', { commandId: 'cmd-A' }),
+      ev(3, 'command/run', { commandId: 'cmd-B' }),
+      ev(4, 'command/done', { commandId: 'cmd-B', kind: 'success' }),
+    ]
+    expect(anchoredBoundaryOf(missingDoneA)).toEqual({ boundarySeq: 1, cut: 2 })
+  })
+
+  test('same id reopened after a paired close is still an orphan', () => {
+    // doneA pairs with the most recent runA (LIFO per id), so the second
+    // runA stays unpaired and the cut must land before it.
+    const reopened = [
+      ev(0, 'turn/start'),
+      ev(1, 'turn/end'),
+      ev(2, 'command/run', { commandId: 'cmd-A' }),
+      ev(3, 'command/done', { commandId: 'cmd-A', kind: 'success' }),
+      ev(4, 'command/run', { commandId: 'cmd-A' }),
+    ]
+    expect(anchoredBoundaryOf(reopened)).toEqual({ boundarySeq: 1, cut: 4 })
+  })
 })
 
 describe('vendor marker integrity', () => {
@@ -74,8 +110,8 @@ describe('vendor marker integrity', () => {
     expect(markers('surgery')).toBe(1)
   })
 
-  test('exactly three [fork:adapt] markers', () => {
-    expect(markers('adapt')).toBe(3)
+  test('exactly two [fork:adapt] markers', () => {
+    expect(markers('adapt')).toBe(2)
   })
 
   test('records the upstream commit SHA', () => {

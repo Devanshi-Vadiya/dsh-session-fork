@@ -1,4 +1,4 @@
-# ROADMAP — dsh-fork: Git-style conversation branching for DeepSeek Harness
+# ROADMAP — dsh-session-fork: Git-style conversation branching for DeepSeek Harness
 
 Status: **v0.0.1 implemented** (ref layer shipped; see §2 and §4) · Upstream: source checkout of dsh at `/Users/skd/Documents/deepseek-harness` · Delivery form: standalone dsh plugin package
 
@@ -26,7 +26,7 @@ missing is the **git layer on top**:
 
 ### Git → dsh concept mapping
 
-| Git concept | dsh-fork realization |
+| Git concept | dsh-session-fork realization |
 |---|---|
 | commit | session event (immutable, append-only log) |
 | commit chain | one session log |
@@ -56,7 +56,7 @@ Deliverables:
 
 - Plugin package skeleton (cordis plugin; installs into the web profile).
 - Branch registry storage (via the storage-domain facility over `ctx.storage`:
-  domain `dsh_fork`, table `branches`, one record per workspace keyed by the
+  domain `dsh_session_fork`, table `branches`, one record per workspace keyed by the
   session's `cwd`). Record shape: `{ name, sessionId, forkOrigin:
   { parentSessionId, atSeq } | null, createdAt? }`. The root branch has
   `forkOrigin: null`.
@@ -190,5 +190,6 @@ Candidate scope, deliberately unordered; each requires its own design note befor
 - v0.0.1 shipped — sync scope with implementation: command family is
   `/branch <name>`/`create`, `adopt`, `list`, `rm --yes`, `rename`;
   `/branch switch` deferred to v0.0.2 (needs GUI cooperation); registry
-  storage clarified as the `dsh_fork` storage-domain (record per workspace
-  cwd, not one JSON file per workspace).
+  storage clarified as the `dsh_session_fork` storage-domain (renamed from
+  `dsh_fork`, 2026-08-20; record per workspace cwd, not one JSON file per
+  workspace).

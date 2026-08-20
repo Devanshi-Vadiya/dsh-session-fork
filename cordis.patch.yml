@@ -1,4 +1,4 @@
-# dsh-fork bundle patch: mounts the dsh-fork plugin into the host
+# dsh-session-fork bundle patch: mounts the dsh-session-fork plugin into the host
 # composition of a dsh profile. Stage 1 registers nothing — it only proves
 # the package loads. Later stages add branch registry, /branch commands,
 # and web UI.
@@ -7,7 +7,7 @@
 # path). The `dsh plugin` command pnpm-installs the package into the profile
 # and reconciles it into the profile's `dsh.profile.bundles` layer list.
 - insert:
-    - id: dsh-fork
+    - id: dsh-session-fork
       # Node-resolvable package name — must stay in sync with package.json
       # `name`.
-      name: 'dsh-fork'
+      name: 'dsh-session-fork'

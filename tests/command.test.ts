@@ -1,7 +1,7 @@
 /**
  * Tests for the /branch command family: parsing, rendering, and the
  * execution core over fake deps (no cordis, no dsh services).
- * @module dsh-fork/tests/command.test
+ * @module dsh-session-fork/tests/command.test
  */
 
 import { describe, expect, test } from 'bun:test'

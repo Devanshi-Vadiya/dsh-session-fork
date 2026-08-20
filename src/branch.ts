@@ -1,7 +1,7 @@
 /**
  * Branch creation: seed a child session through the official agent path and
  * record the ref.
- * @module dsh-fork/src/branch
+ * @module dsh-session-fork/src/branch
  *
  * A single durable route mirrors the host web GUI's own fork
  * (api-proxy `session.fork`) for **every** source, live or cold: the seed
@@ -16,7 +16,7 @@
  * only one.
  *
  * Boundary computation is vendored from the host fork handler (see
- * {@link forkBoundaryOf} and `src/vendor/fork.ts`). All dsh touchpoints are
+ * `src/vendor/fork.ts`). All dsh touchpoints are
  * injected through {@link BranchPorts}, so the logic is unit-testable
  * without cordis.
  */
@@ -73,24 +73,6 @@ export interface BranchPorts {
   ): Promise<void>
 }
 
-/**
- * Locate the fork boundary in the source log.
- *
- * Thin adapter over the vendored copy of the api-proxy boundary logic
- * (`anchoredBoundaryOf` in `src/vendor/fork.ts`, which also enforces the
- * seed-balance invariant against orphan `command/run` events); see there
- * for the upstream semantics and markers.
- *
- * @returns `null` when no completed turn anchors the fork.
- */
-export function forkBoundaryOf(
-  events: readonly SourceEvent[],
-  atSeq?: number,
-): { turnEndSeq: number; cut: number } | null {
-  const boundary = anchoredBoundaryOf(events, atSeq)
-  return boundary === null ? null : { turnEndSeq: boundary.boundarySeq, cut: boundary.cut }
-}
-
 /** Options for {@link createBranchFrom}. */
 export interface CreateBranchOptions {
   /**
@@ -128,7 +110,7 @@ export async function createBranchFrom(
       `no session named '${sourceSessionId}' exists`,
     )
   }
-  const boundary = forkBoundaryOf(source.events, options.atSeq)
+  const boundary = anchoredBoundaryOf(source.events, options.atSeq)
   if (boundary === null) {
     throw new BranchForkError(
       'fork-unavailable',
@@ -148,7 +130,7 @@ export async function createBranchFrom(
     sessionId: childId,
     forkOrigin: Object.freeze({
       parentSessionId: source.id,
-      atSeq: boundary.turnEndSeq,
+      atSeq: boundary.boundarySeq,
     }),
     createdAt: new Date().toISOString(),
   })
