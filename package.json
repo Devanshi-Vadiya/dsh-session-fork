@@ -74,8 +74,6 @@
     "@deepseek-ai/dsh-token-meter": {
       "optional": true
     }
-      "optional": true
-    }
   },
   "dependencies": {
     "zod": "^4.4.3"

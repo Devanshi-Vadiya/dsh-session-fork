@@ -14,15 +14,22 @@ import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-sess
 // Type-only presence import: pulls in this package's Context augmentation
 // (`ctx.sessionPersistence`) without any runtime dependency on it.
 import type {} from '@deepseek-ai/dsh-session-persistence'
+// Same presence pattern for the compaction services the squash pipeline
+// consumes (`ctx.llm`, `ctx.tokenMeter`).
+import type {} from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-token-meter'
 import type { BranchPorts, SourceSessionView } from './branch.js'
 import { BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction } from './command.js'
 import { loadRegistry } from './registry.js'
 import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
 import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
+import { executeSquashAction, parseSquashAction } from './squash-command.js'
+import type { SquashAgent } from './squash-command.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
-import { composeAgent, forkWorkspace } from './vendor/fork.js'
+import { compactNow } from './vendor/compact.js'
+import { composeAgent, forkWorkspace, getOrResumeAgent, getOrResumeDeps } from './vendor/fork.js'
 import type { AgentPresetsLike, WorkspaceLike } from './vendor/fork.js'
 
 export type * from './types.js'
@@ -72,13 +79,29 @@ export type {
   RpcInternalError,
   RpcResult,
 } from './rpc.js'
+export {
+  SQUASH_USAGE,
+  executeSquashAction,
+  parseSquashAction,
+} from './squash-command.js'
+export type { SquashAction, SquashCommandDeps } from './squash-command.js'
 export { createDomainStore, dshForkDomainSpec } from './store.js'
 export type { DomainLike } from './store.js'
 
 export const name = 'dsh-session-fork'
 
 /** Host services this plugin needs; the web-app bundle provides all. */
-export const inject = ['commands', 'storageDomain', 'sessions', 'sessionPersistence', 'agents', 'apiProxy', 'connection']
+export const inject = [
+  'commands',
+  'storageDomain',
+  'sessions',
+  'sessionPersistence',
+  'agents',
+  'tokenMeter',
+  'llm',
+  'apiProxy',
+  'connection',
+]
 
 /**
  * Full log (header + events) of each view handed out by {@link makePorts},
@@ -270,6 +293,16 @@ export const branchCommandDefinition = {
 } as const
 
 /**
+ * The `/squash` command definition registered by {@link apply}. The
+ * `input` hint is load-bearing for the same bare-command reason as above.
+ */
+export const squashCommandDefinition = {
+  name: 'squash',
+  description: 'Squash this branch back into its parent as one summary checkpoint',
+  input: { hint: 'into <branch>' },
+} as const
+
+/**
  * Register `/branch`, serve the GUI's custom RPC channel, and own the
  * storage-domain lifecycle — the same effect shape the command-compact
  * lifecycle uses. The yields run: command registration, RPC channel
@@ -362,6 +395,29 @@ export async function apply(ctx: Context): Promise<void> {
       yield registerRpcChannel(connection, createBranchRpcHandler(rpcPorts))
     }
 
+    yield ctx.commands.register({
+      ...squashCommandDefinition,
+      handler: (invocation: CommandInvocation): Promise<CommandResult> => {
+        const workspaceKey = invocation.agent.session.header.cwd ?? ''
+        const operation = Promise.resolve(
+          executeSquashAction(parseSquashAction(invocation.rawInput), {
+            childAgent: invocation.agent as SquashAgent,
+            signal: invocation.signal,
+            ...invocation.commandId === undefined ? {} : { commandId: invocation.commandId },
+            store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+            compact: (agent, signal, request) =>
+              compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
+            resolveParentAgent: (sessionId) =>
+              getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<SquashAgent>,
+            flush: (agent) => ctx.sessions.flush(agent.session),
+          }),
+        ) as Promise<CommandResult>
+        active.add(operation)
+        const retire = (): void => { active.delete(operation) }
+        void operation.then(retire, retire)
+        return operation
+      },
+    })
     yield async () => { await Promise.allSettled(active) }
     yield async () => { await domain.close() }
   }, 'dsh-session-fork lifecycle')
