@@ -217,3 +217,9 @@ Candidate scope, deliberately unordered; each requires its own design note befor
   provenance rides the checkpoint's plugin source (the official session-event
   vocabulary is closed to downstream plugins); a summary that would not shrink
   throws (rebase-mode hint deferred to v0.1.x).
+- v0.0.3 shipped — sync scope with implementation: `/squash into <branch>` with
+  the vendored compact engine (`src/vendor/compact.ts`, 2 surgeries) and the
+  ensureSession kernel (`getOrResumeAgent` in `src/vendor/fork.ts`); pure logic
+  in `src/squash.ts`, command wiring in `src/squash-command.ts`; acceptance
+  items #1–#6 mapped 1:1 to tests (`tests/squash-e2e.test.ts`), 122 tests green;
+  vendored against deepseek-harness@528c682e.

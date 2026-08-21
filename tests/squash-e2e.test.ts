@@ -276,10 +276,6 @@ describe('squash e2e: full /squash pipeline into the parent', () => {
       new AbortController().signal,
       { start: 3, end: 7, flush: async () => { } },
     )
-    console.log('POST-COMPACT surface:', child.surface.nodes, 'tail types:', child.events.slice(-4).map(e => e.type))
-    const tailNode = child.surface.nodes[child.surface.nodes.length - 1]!
-    const tailMsg = child.deriveEventMessage(child.events[tailNode] as SessionEvent)
-    console.log('TAIL node', tailNode, 'events[10].type:', (child.events[10] as SessionEvent).type, 'events[9]:', (child.events[9] as SessionEvent).type, 'events[11]:', (child.events[11] as SessionEvent).type, 'total events:', child.events.length)
     const parent = fakeSession(
       { id: 'session-parent', cwd: '/w' },
       [
