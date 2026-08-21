@@ -128,14 +128,31 @@ Deliverables:
 
 - `/squash into <branch>` command, run from the child branch.
 - Pipeline: wait for the child agent to go idle → compact the child's **post-fork
-  region** using the native compaction seam (`ctx.compaction.compactRegion`) → read
-  the compacted child surface → append into the parent: one plugin merge event
-  (log-only provenance: child id, anchor, compacted range) plus the summary
-  checkpoint and conclusion messages.
+  region** (seed boundary through the end of the child surface) with a vendored
+  `compactNow` shell that takes an explicit region parameter → read the compacted
+  child surface → append into the parent the summary checkpoint; the checkpoint is
+  itself the conclusion — the entire post-fork region is compressed, nothing is
+  carried over verbatim.
+- Deviation from the native seam (deliberate): official
+  `ctx.compaction.compactRegion` requires an open turn, and command execution has
+  none ("no turn wraps them" — interaction/commands/src/index.ts:283); official
+  `compactNow` auto-selects its region from the head of the surface, which would
+  swallow the inherited prefix. Hence the vendored compactNow shell (surgery:
+  explicit region parameter), run idle under the agent's maintenance machinery.
+- Merge provenance: recorded in the parent-appended checkpoint's plugin source —
+  `MessageSourceMap` is merge-extensible — rather than a custom plugin merge event,
+  because the official session-event vocabulary is closed to downstream plugins
+  (`KNOWN_SESSION_EVENT_TYPES` is a generated set with no registration API, and
+  append cannot write `ignorable`).
+- Summarizer input: the child's **full** surface (inherited prefix + post-fork
+  region) is fed to the model, with instructions delimiting the compaction target
+  as the last M surface messages (M = region node count) and demanding that earlier
+  established context be absorbed, not re-stated — no in-band marker text,
+  preserving provider prefix caching.
 - Parent-side write path: reuse the live agent if one exists in this process, else
   cold-resume it (`ctx.agents.resume`), append, flush; do not dispose afterward.
-- Short-region fallback: if compaction is rejected (summary would not shrink),
-  carry the original messages over verbatim and report "not compacted".
+- Short-region fallback: a summary that would not shrink throws an error;
+  TODO: v0.1.x error.message suggests rebase mode.
 
 Acceptance:
 
@@ -193,3 +210,10 @@ Candidate scope, deliberately unordered; each requires its own design note befor
   storage clarified as the `dsh_session_fork` storage-domain (renamed from
   `dsh_fork`, 2026-08-20; record per workspace cwd, not one JSON file per
   workspace).
+- 2026-08-21 — v0.0.3 squash scope locked (source-level evidence in Mnemon document
+  `ca95142e`): vendored `compactNow` shell with an explicit post-fork region (native
+  `compactRegion` requires an open turn; native `compactNow` would swallow the
+  inherited prefix); the parent-appended checkpoint is itself the conclusion; merge
+  provenance rides the checkpoint's plugin source (the official session-event
+  vocabulary is closed to downstream plugins); a summary that would not shrink
+  throws (rebase-mode hint deferred to v0.1.x).
