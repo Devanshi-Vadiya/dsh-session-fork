@@ -98,6 +98,22 @@ describe('extractTurns', () => {
     expect(extractTurns(events, seed.length).map(turn => turn.turn)).toEqual([2])
   })
 
+  test('user messages outside any open turn are ignored', () => {
+    // A pre-turn orphan (queued or replay residue) must not leak into the
+    // next turn's subject — not even as the fallback.
+    const events = [
+      {
+        seq: 0, type: 'user/message', time: 1,
+        data: { role: 'user', content: [{ type: 'text', text: 'orphan' }], source: { kind: 'user' } },
+      },
+      { seq: 1, type: 'turn/start', time: 2, data: { turn: 1 } },
+      { seq: 2, type: 'turn/end', time: 3, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    const turns = extractTurns(events)
+    expect(turns).toHaveLength(1)
+    expect(turns[0]!.subject).toBe('')
+  })
+
   test('ignores null-turn brackets and never-opened trailing turns', () => {
     const events = [
       { seq: 0, type: 'turn/start', time: 1, data: { turn: null } },
@@ -234,6 +250,24 @@ describe('assembleBranchGraph', () => {
     const graph = await assembleBranchGraph([], 's-any', readerOf(new Map()).readSession)
     expect(graph.nodes).toEqual([])
     expect(graph.head).toBeNull()
+  })
+
+  test('timestamp-less logs order deterministically by branch order then seq', async () => {
+    // No turn/start times: every row's primary sort key falls back to 0, so
+    // the tie-break decides — later-declared branch session first, then
+    // higher seq within a session (still newest-first overall).
+    const stripTime = (events: readonly GraphEvent[]): GraphEvent[] =>
+      events.map(({ time: _time, ...rest }) => rest)
+    const logs = new Map<string, GraphSessionLog>([
+      ['s-a', { header: {}, events: stripTime(sessionEvents([{ turn: 1, subject: 'a1', time: 1 }])) }],
+      ['s-b', { header: {}, events: stripTime(sessionEvents([{ turn: 1, subject: 'b1', time: 1 }, { turn: 2, subject: 'b2', time: 2 }])) }],
+    ])
+    const branches: BranchLike[] = [
+      { name: 'a', sessionId: 's-a', forkOrigin: null },
+      { name: 'b', sessionId: 's-b', forkOrigin: null },
+    ]
+    const graph = await assembleBranchGraph(branches, 's-a', readerOf(logs).readSession)
+    expect(graph.nodes.map(node => node.id)).toEqual(['s-b:2', 's-b:1', 's-a:1'])
   })
 })
 

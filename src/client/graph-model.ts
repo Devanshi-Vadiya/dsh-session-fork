@@ -8,7 +8,11 @@
  * rendering on top.
  */
 
-import type { ISCMHistoryItem, ISCMHistoryItemRef } from './vendor/vscode/types.js'
+import type {
+  ISCMHistoryItem,
+  ISCMHistoryItemRef,
+  ISCMHistoryItemViewModel,
+} from './vendor/vscode/types.js'
 
 /** Host RPC channel this plugin owns (mirror of the host-side constant). */
 export const RPC_CHANNEL = '/dsh-session-fork'
@@ -33,6 +37,13 @@ export interface GraphNodeDto {
 export interface GraphPayloadDto {
   readonly nodes: readonly GraphNodeDto[]
   readonly head: string | null
+}
+
+/** Wire shape of one `registry` endpoint branch row, as the view reads it. */
+export interface RegistryBranchDto {
+  readonly name: string
+  readonly sessionId: string
+  readonly dangling: boolean
 }
 
 /** Result of the mapping: vscode history items plus the HEAD ref. */
@@ -65,4 +76,21 @@ export function toGraphHistoryModel(payload: GraphPayloadDto): GraphHistoryModel
       ? undefined
       : { id: HEAD_REF_ID, name: HEAD_REF_ID, revision: payload.head },
   }
+}
+
+/**
+ * The palette identifier of one row's circle lane, mirroring the vendored
+ * renderer's own pick (renderSCMHistoryItemGraph): the output swimlane's
+ * color at the circle index when present, otherwise the input swimlane's.
+ * `undefined` when neither lane exists (the renderer then falls back to its
+ * ref color); consumers pass the result through the shims' asCssVariable to
+ * get the CSS variable reference.
+ */
+export function rowLaneColor(viewModel: ISCMHistoryItemViewModel): string | undefined {
+  const { historyItem, inputSwimlanes, outputSwimlanes } = viewModel
+  const inputIndex = inputSwimlanes.findIndex(node => node.id === historyItem.id)
+  const circleIndex = inputIndex !== -1 ? inputIndex : inputSwimlanes.length
+  if (circleIndex < outputSwimlanes.length) return outputSwimlanes[circleIndex]?.color
+  if (circleIndex < inputSwimlanes.length) return inputSwimlanes[circleIndex]?.color
+  return undefined
 }

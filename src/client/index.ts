@@ -18,7 +18,12 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // owning package) must be in the program for the register call to type.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { BranchGraphView, type BranchGraphInjected } from './BranchGraphView.tsx'
-import { RPC_CHANNEL, type GraphPayloadDto, type GraphRpcResult } from './graph-model.ts'
+import {
+  RPC_CHANNEL,
+  type GraphPayloadDto,
+  type GraphRpcResult,
+  type RegistryBranchDto,
+} from './graph-model.ts'
 import { en, NS, zh } from './locales.ts'
 
 /**
@@ -71,6 +76,23 @@ export function apply(ctx: Context): void {
         const result: Promise<GraphRpcResult> =
           connection.rpc.call(RPC_CHANNEL, 'graph', { sessionId }, signal)
         return result as Promise<GraphRpcResult<GraphPayloadDto>>
+      },
+      // The registry snapshot rides along for the dangling-branch section
+      // (a branch whose session vanished renders distinctly, not hidden).
+      loadDangling: (signal?: AbortSignal): Promise<GraphRpcResult<readonly string[]>> => {
+        if (connection === undefined) return Promise.resolve(graphUnavailable())
+        const call: Promise<GraphRpcResult> =
+          connection.rpc.call(RPC_CHANNEL, 'registry', { sessionId }, signal)
+        return call.then((result): GraphRpcResult<readonly string[]> => {
+          if (!result.ok) return result
+          const value = result.value as { branches: readonly RegistryBranchDto[] }
+          return {
+            ok: true,
+            value: value.branches
+              .filter(branch => branch.dangling)
+              .map(branch => branch.name),
+          }
+        })
       },
     }),
   }, BranchGraphView))
