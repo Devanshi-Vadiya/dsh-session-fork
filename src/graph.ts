@@ -15,9 +15,12 @@
  *   closes it. `data.turn` is the durable turn handle used in node ids.
  * - `user/message` carries a `UserMessage` (`{ role, content, source }`);
  *   `content` blocks of `type: 'text'` carry the prompt text, and
- *   `source.kind === 'user'` marks a direct human prompt (vs synthetic
- *   injections with `source.kind === 'plugin'`), per the dsh-llm
- *   `MessageSourceMap`.
+ *   `source.kind === 'user'` marks a direct human prompt. Synthetic
+ *   injections (`plugin`, `goal`, `subagent-settled`, …) NEVER form rows:
+ *   per the project's graph rule (user decision, 2026-08-21), only turns
+ *   containing a real human message become commits — harness-injected
+ *   turns (goal rounds, reminders, team messages) render nothing, per the
+ *   dsh-llm `MessageSourceMap`.
  * - Fork lineage: a seeded child's log starts with the parent's prefix, so
  *   `header.seedLength` splits inherited events from the child's own work,
  *   and `header.parentSession` names the seed source (SessionHeader).
@@ -88,8 +91,6 @@ interface OpenTurn {
   endSeq: number | null
   /** First human-prompt subject found in the turn, '' when none yet. */
   subject: string
-  /** Any user message seen (human or synthetic), used as subject fallback. */
-  fallbackSubject: string
 }
 
 /**
@@ -98,7 +99,10 @@ interface OpenTurn {
  * Only events at `seq >= fromSeq` are considered; production passes the
  * session's `header.seedLength` so a forked child contributes exactly its
  * own turns (the inherited parent prefix appears through the parent's own
- * branch). A turn without any user message yields `subject: ''`.
+ * branch). A turn without a human prompt emits NO row at all — synthetic
+ * injections (goal rounds, plugin reminders, team messages) are not
+ * commits; each session's row chain links across the skipped turns
+ * naturally (every row parents the previous emitted row).
  */
 export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSlice[] {
   const turns: TurnSlice[] = []
@@ -118,7 +122,6 @@ export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSl
             ...(event.time === undefined ? {} : { startTime: event.time }),
             endSeq: null,
             subject: '',
-            fallbackSubject: '',
           }
         }
         break
@@ -126,24 +129,23 @@ export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSl
       case 'turn/end': {
         if (open !== null && data !== null && typeof data === 'object'
           && (data as { turn?: unknown }).turn === open.turn) {
-          turns.push({
-            turn: open.turn,
-            startSeq: open.startSeq,
-            endSeq: event.seq,
-            ...(open.startTime === undefined ? {} : { startTime: open.startTime }),
-            subject: open.subject !== '' ? open.subject : open.fallbackSubject,
-          })
+          if (open.subject !== '') {
+            turns.push({
+              turn: open.turn,
+              startSeq: open.startSeq,
+              endSeq: event.seq,
+              ...(open.startTime === undefined ? {} : { startTime: open.startTime }),
+              subject: open.subject,
+            })
+          }
           open = null
         }
         break
       }
       case 'user/message': {
-        if (open !== null) {
+        if (open !== null && open.subject === '' && isHumanPrompt(data)) {
           const text = userMessageText(data)
-          if (text !== '') {
-            if (open.subject === '' && isHumanPrompt(data)) open.subject = text
-            if (open.fallbackSubject === '') open.fallbackSubject = text
-          }
+          if (text !== '') open.subject = text
         }
         break
       }
