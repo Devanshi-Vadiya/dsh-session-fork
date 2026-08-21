@@ -155,7 +155,6 @@ body[data-ds-dark-theme] .graph {
 }
 
 .label {
-  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -169,32 +168,11 @@ body[data-ds-dark-theme] .graph {
   color: var(--dsw-alias-label-secondary);
 }
 
-/* Full-text tooltip on hover: fades in over the ellipsized label. */
-.label::after {
-  content: attr(data-full);
-  position: absolute;
-  left: 0;
-  top: 100%;
-  z-index: 10;
-  max-width: 480px;
-  padding: 4px 8px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-layer-3);
-  color: var(--dsw-alias-label-primary);
-  font-weight: 400;
-  white-space: normal;
-  word-break: break-word;
-  pointer-events: none;
-  opacity: 0;
-  transform: translateY(2px);
-  transition: opacity 0.15s ease-in, transform 0.15s ease-in;
-}
-
-.label:hover::after {
-  opacity: 1;
-  transform: translateY(0);
-}
+/*
+ * Full-text hover went to the official Tooltip primitive (issue #8):
+ * fixed positioning, delay, collision flip — the attr(data-full) bubble
+ * is gone; the label above keeps only its ellipsis.
+ */
 
 /* Branch-name badge — vscode Source Control Graph recipe (scm.css
  * .label-container > .label + _renderBadge): solid fill in the ref's

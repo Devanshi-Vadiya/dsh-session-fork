@@ -8,18 +8,18 @@
  * P4 polish on top: theme-following palette (dark-theme override in the CSS
  * module), solid vscode-style ref badges (lane-color fill, branch icon +
  * name, per scmHistoryViewPane._renderBadge), a strong `current` treatment
- * on the HEAD row, fade-in full-text tooltip on ellipsized labels, a
- * loading skeleton, and a retry affordance in the error state. Shared
- * chrome (row rhythm, typography, hover) follows the official trajectory
- * tab (user decision, 2026-08-21); branch-specific elements follow the
- * vscode Source Control Graph source.
+ * on the HEAD row, full-text hover through the official Tooltip primitive
+ * (issue #8), a loading skeleton, and a retry affordance in the error
+ * state. Shared chrome (row rhythm, typography, hover) follows the
+ * official trajectory tab (user decision, 2026-08-21); branch-specific
+ * elements follow the vscode Source Control Graph source.
  * @module dsh-session-fork/src/client/BranchGraphView
  */
 
 import { useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconBranchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBranchOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   rowLaneColor,
   toGraphHistoryModel,
@@ -151,9 +151,14 @@ function GraphRow({
         {meta !== undefined && (
           <span className={css.twistie} aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         )}
-        <span className={css.label} data-full={viewModel.historyItem.subject}>
-          {viewModel.historyItem.subject}
-        </span>
+        <Tooltip
+          label={viewModel.historyItem.subject}
+          side="bottom"
+          delayMs={300}
+          maxWidth={480}
+        >
+          <span className={css.label}>{viewModel.historyItem.subject}</span>
+        </Tooltip>
         {references.length > 0 && (
           <div className={css.labelContainer}>
             {references.map(ref => (
@@ -184,7 +189,9 @@ function GraphRow({
               <span className={`${css.eventType} ${eventKindClass(event.type)}`} data-event-type={event.type}>
                 {event.type}
               </span>
-              <span className={css.eventText} title={event.text}>{event.text}</span>
+              <Tooltip label={event.text} side="bottom" delayMs={300} maxWidth={480}>
+                <span className={css.eventText}>{event.text}</span>
+              </Tooltip>
             </div>
           ))}
         </div>

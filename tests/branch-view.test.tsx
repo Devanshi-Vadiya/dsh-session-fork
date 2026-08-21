@@ -133,9 +133,12 @@ describe('BranchGraphView states', () => {
     expect(badges).toHaveLength(1)
     // The badge carries the branch icon (official IconBranchOutline16).
     expect(badges[0]?.querySelector('svg')).not.toBeNull()
-    // The label carries the full text for the CSS tooltip.
-    const label = mounted.container.querySelector('[data-full="second turn"]')
-    expect(label).not.toBeNull()
+    // The label spans render as the official Tooltip primitive's anchors
+    // (issue #8): no data-full CSS-tooltip residue anywhere.
+    const label = [...mounted.container.querySelectorAll('span')]
+      .find(span => span.textContent === 'second turn')
+    expect(label).toBeDefined()
+    expect(mounted.container.querySelector('[data-full]')).toBeNull()
     await act(async () => { mounted.root.unmount() })
   })
 
@@ -224,10 +227,12 @@ describe('row expansion (issue #8)', () => {
     expect(badges.map(badge => badge.textContent)).toEqual([
       'turn/start', 'user/message', 'tool/call', 'turn/end',
     ])
-    // Full summary text is available on hover (title attribute).
-    const toolLine = [...mounted.container.querySelectorAll('[title]')]
-      .find(element => element.getAttribute('title') === 'tool bash: {"command":"ls"}')
+    // Full summary text rides the official Tooltip primitive (no title
+    // attribute fallback anymore, issue #8).
+    const toolLine = [...mounted.container.querySelectorAll('span')]
+      .find(span => span.textContent === 'tool bash: {"command":"ls"}')
     expect(toolLine).toBeDefined()
+    expect(mounted.container.querySelector('[title]')).toBeNull()
     await act(async () => { mounted.root.unmount() })
   })
 
@@ -341,10 +346,11 @@ describe('BranchGraphView CSS contract (source text)', () => {
     expect(css.match(/--dsh-fork-graph-3: #d9944d/)).not.toBeNull()
   })
 
-  test('the label ellipsizes and the tooltip fades in', () => {
+  test('the label ellipsizes; full text went to the official Tooltip primitive', () => {
     expect(css).toContain('text-overflow: ellipsis')
-    expect(css).toContain('content: attr(data-full)')
-    expect(css).toMatch(/transition: opacity/)
+    // The CSS attr() bubble is gone (issue #8 replaced it with Tooltip).
+    expect(css).not.toContain('content: attr(data-full)')
+    expect(css).not.toContain('.label::after')
   })
 
   test('rows hover, the HEAD row is the current treatment, and badges are solid vscode chips', () => {
