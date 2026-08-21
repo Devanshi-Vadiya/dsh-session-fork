@@ -429,13 +429,14 @@ export async function apply(ctx: Context): Promise<void> {
           async resolveChildAgent(sessionId) {
             const live = ctx.agents.get(sessionId as Session['id'])
             if (live !== undefined) return live as SquashAgent
-            try {
-              return await getOrResumeAgent(
-                getOrResumeDeps(ctx), sessionId as Session['id'],
-              ) as SquashAgent
-            } catch {
-              return null
-            }
+            // `null` is reserved for a session that does not exist at all;
+            // an existing-but-unresolvable session (a resume I/O failure,
+            // for instance) propagates its real error instead of being
+            // misreported as "no session exists" downstream.
+            if (!(await sessionExists(ctx, sessionId))) return null
+            return getOrResumeAgent(
+              getOrResumeDeps(ctx), sessionId as Session['id'],
+            ) as Promise<SquashAgent>
           },
           openStore: (workspaceKey) =>
             createDomainStore(domain as unknown as DomainLike, workspaceKey),
