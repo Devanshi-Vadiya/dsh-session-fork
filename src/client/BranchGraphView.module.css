@@ -1,5 +1,5 @@
 /*
- * Branch graph view styles. Lane geometry (22px row height, 11px lane
+ * Branch graph view styles. Lane geometry (38px row height, 19px lane
  * width, 4px circles) comes from the vendored renderer's constants; the
  * five-lane palette is defined here as the CSS variables the vendored
  * asCssVariable shim resolves onto (var(--dsh-fork-graph-1..5) plus the
@@ -43,12 +43,16 @@ body[data-ds-dark-theme] .graph {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 22px;
+  /* Trajectory-tab row rhythm: 38px rows (matches the vendored
+   * SWIMLANE_HEIGHT [fork:adapt] so the lane SVGs stay contiguous). */
+  min-height: 38px;
   padding: 0 8px;
 }
 
 .historyItem:hover {
-  background: var(--dsw-alias-bg-layer-2);
+  /* Trajectory-tab hover (ui-trajectory TrajectoryTable): the interactive
+   * alias, not a raw layer bump. */
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 /* The current session's HEAD row: the "当前分支" treatment. */
@@ -57,7 +61,8 @@ body[data-ds-dark-theme] .graph {
 }
 
 .current .label {
-  font-weight: 600;
+  font: var(--dsw-font-xs-strong-13);
+  color: var(--dsw-alias-label-primary);
 }
 
 .graphContainer {
@@ -73,12 +78,12 @@ body[data-ds-dark-theme] .graph {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  /* Match the official session-list row typography (ui-workspace
-   * rows/Rows.module.css): same inherited family at 14px/20px. The size
-   * was previously unset and inherited the 16px body default, crowding
-   * the 22px lane row. */
-  font-size: 14px;
-  line-height: 20px;
+  /* Trajectory-tab typography (ui-trajectory cells): the xs-13 token
+   * (13px/20px, weight 400) in the secondary label color — smaller,
+   * lighter, and less stark than the primary white (user decision,
+   * 2026-08-21: shared elements follow the trajectory tab). */
+  font: var(--dsw-font-xs-13);
+  color: var(--dsw-alias-label-secondary);
 }
 
 /* Full-text tooltip on hover: fades in over the ellipsized label. */
@@ -108,25 +113,41 @@ body[data-ds-dark-theme] .graph {
   transform: translateY(0);
 }
 
-/* Branch-name pill: rounded, translucent, with the branch's lane color dot. */
-.ref {
-  display: inline-flex;
+/* Branch-name badge — vscode Source Control Graph recipe (scm.css
+ * .label-container > .label + _renderBadge): solid fill in the ref's
+ * lane color, contrast foreground (upstream uses PANEL_BACKGROUND),
+ * border-radius 10px, 18px line-height, a branch icon plus the name at
+ * 12px. No border, no separate dot — the whole badge is the color. */
+.labelContainer {
+  display: flex;
   align-items: center;
+  flex-shrink: 0;
+  margin-left: 4px;
   gap: 4px;
-  flex: none;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 999px;
-  background: var(--dsw-alias-bg-mask-2);
-  padding: 0 8px;
-  font-size: 12px;
-  line-height: 18px;
 }
 
-.refDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: none;
+.ref {
+  display: flex;
+  align-items: center;
+  border-radius: 10px;
+  line-height: 18px;
+  padding: 0 2px;
+  color: var(--dsw-alias-bg-layer-1);
+  font-size: 12px;
+}
+
+.refIcon {
+  display: flex;
+  align-items: center;
+  padding: 3px;
+}
+
+.refName {
+  max-width: 100px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding-right: 4px;
 }
 
 .state {
@@ -165,7 +186,7 @@ body[data-ds-dark-theme] .graph {
 
 /* Loading skeleton: quiet placeholder bars while the graph loads. */
 .skeletonRow {
-  height: 22px;
+  height: 38px;
   margin: 0 8px;
   border-radius: 4px;
   background: var(--dsw-alias-bg-skeleton);

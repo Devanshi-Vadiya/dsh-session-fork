@@ -15,8 +15,10 @@
  * Excluded upstream regions (not part of the graph core): 277-290
  * (renderSCMHistoryGraphPlaceholder), 409-418 (getHistoryItemIndex),
  * 560-607 (toHistoryItemHoverContent). The import block is adapted to the
- * plugin's shim/type modules (see the [fork:adapt] marker); every other
- * line is byte-for-byte upstream text, including indentation and comments.
+ * plugin's shim/type modules (see the [fork:adapt] marker), and the two
+ * swimlane constants are rescaled to the trajectory-tab row rhythm (see
+ * the second [fork:adapt] marker); every other line is byte-for-byte
+ * upstream text, including indentation and comments.
  *
  * Upstream license (preserved): the copied code is
  * Copyright (c) Microsoft Corporation, licensed under the MIT License.
@@ -46,8 +48,13 @@ import { rot } from './shims.js';
 import { PANEL_BACKGROUND } from './shims.js';
 import { findLastIdx } from './shims.js';
 
-export const SWIMLANE_HEIGHT = 22;
-export const SWIMLANE_WIDTH = 11;
+// [fork:adapt] lane geometry: upstream pins SWIMLANE_HEIGHT=22 /
+// SWIMLANE_WIDTH=11 (vscode's 22px list rows). This plugin's rows follow
+// the dsh trajectory tab's 38px rhythm (user decision, 2026-08-21), so
+// both constants are scaled by the same 19/11 factor to keep the upstream
+// lane proportions; every other geometry constant is untouched upstream.
+export const SWIMLANE_HEIGHT = 38;
+export const SWIMLANE_WIDTH = 19;
 const SWIMLANE_CURVE_RADIUS = 5;
 const CIRCLE_RADIUS = 4;
 const CIRCLE_STROKE_WIDTH = 2;

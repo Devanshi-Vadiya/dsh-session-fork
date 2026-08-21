@@ -12,6 +12,8 @@ import { readFileSync } from 'node:fs'
 import { Window } from 'happy-dom'
 import {
   renderSCMHistoryItemGraph,
+  SWIMLANE_HEIGHT,
+  SWIMLANE_WIDTH,
   toISCMHistoryItemViewModelArray,
 } from '../src/client/vendor/vscode/scm-history.ts'
 import { rot } from '../src/client/vendor/vscode/shims.ts'
@@ -169,12 +171,14 @@ describe('renderSCMHistoryItemGraph', () => {
     expect(circles[1]!.getAttribute('r')).toBe('3')
   })
 
-  test('the svg row keeps the upstream 22px row height and lane-based width', () => {
+  test('the svg row keeps the adapted 38px row height and lane-based width', () => {
     const vms = renderVms([item('y', ['b']), item('x', ['b']), item('b', ['a']), item('a', [])])
     const svg = renderSCMHistoryItemGraph(vms[1]!)
-    expect(svg.style.height).toBe('22px')
-    // width = SWIMLANE_WIDTH * (max(input, output, 1) + 1) = 11 * 3.
-    expect(svg.style.width).toBe('33px')
+    // [fork:adapt] lane geometry: SWIMLANE_HEIGHT 38 (trajectory-tab row
+    // rhythm), SWIMLANE_WIDTH 19 (same 19/11 scale factor).
+    expect(svg.style.height).toBe('38px')
+    // width = SWIMLANE_WIDTH * (max(input, output, 1) + 1) = 19 * 3.
+    expect(svg.style.width).toBe('57px')
   })
 
   test('the fork lane merge renders arc-segmented paths', () => {
@@ -203,19 +207,28 @@ describe('vendor marker integrity', () => {
     expect(source).toContain('MIT License')
   })
 
-  test('exactly one [fork:adapt] marker (the import-block rewrite) and zero [fork:surgery]', () => {
-    expect(markers('adapt')).toBe(1)
+  test('exactly two [fork:adapt] markers (import block + lane constants) and zero [fork:surgery]', () => {
+    expect(markers('adapt')).toBe(2)
     expect(markers('surgery')).toBe(0)
   })
 
+  test('the lane constants carry the adapted 19/11-scaled values', () => {
+    // [fork:adapt] geometry: upstream 22/11 scaled by 19/11 to the
+    // trajectory-tab row rhythm (user decision, 2026-08-21).
+    expect(SWIMLANE_HEIGHT).toBe(38)
+    expect(SWIMLANE_WIDTH).toBe(19)
+  })
+
   test('the vendored body matches the upstream slice byte-for-byte (SHA-256 drift guard)', () => {
-    // Guards against silent drift of the copied regions: the body after the
-    // adapted import block must hash to the SHA-256 of the exact upstream
-    // line ranges listed in the VENDORED FROM header (ranges 20-24, 26-68,
-    // 70-122, 124-275, 292-407, 420-530, 532-558 of
-    // src/vs/workbench/contrib/scm/browser/scmHistory.ts @ 611c5df).
-    const body = source.slice(source.indexOf('export const SWIMLANE_HEIGHT'))
+    // Guards against silent drift of the copied regions: everything after
+    // the adapted constants block must hash to the SHA-256 of the exact
+    // upstream line ranges listed in the VENDORED FROM header (ranges
+    // 26-68, 70-122, 124-275, 292-407, 420-530, 532-558 of
+    // src/vs/workbench/contrib/scm/browser/scmHistory.ts @ 611c5df);
+    // the constants block itself (upstream 20-24) is the pinned
+    // [fork:adapt] region covered by the dedicated test above.
+    const body = source.slice(source.indexOf('const SWIMLANE_CURVE_RADIUS'))
     const digest = createHash('sha256').update(body).digest('hex')
-    expect(digest).toBe('abb96b398f8ba34d5a239d6120c0bece4a6d6fe6fcfe8e4ce1cbcb074202f523')
+    expect(digest).toBe('3406406cf1ba40bd8f5125268106d55122be103982290abe16c06f37249886fd')
   })
 })
