@@ -106,7 +106,7 @@ describe('BranchGraphView states', () => {
     await act(async () => { mounted.root.unmount() })
   })
 
-  test('ready state renders one svg row per node with the ref pill and its lane-color dot', async () => {
+  test('ready state renders one svg row per node with the solid lane-color ref badge', async () => {
     const mounted = mount(() => Promise.resolve(resultOf(TWO_BRANCH_GRAPH)))
     await flush()
     const rows = mounted.container.querySelectorAll('svg.graph')
@@ -114,11 +114,14 @@ describe('BranchGraphView states', () => {
     for (const subject of ['second turn', 'first turn', 'root turn']) {
       expect(mounted.container.textContent).toContain(subject)
     }
-    // The branch pill: name text plus a colored dot backed by a palette var.
+    // The vscode-style badge: name text plus an icon inside a span whose
+    // BACKGROUND is filled by a lane-palette variable (solid color chip).
     expect(mounted.container.textContent).toContain('exp')
-    const dots = [...mounted.container.querySelectorAll('span')]
-      .filter(span => (span as HTMLElement).style.background.includes('--dsh-fork-graph'))
-    expect(dots).toHaveLength(1)
+    const badges = [...mounted.container.querySelectorAll('span')]
+      .filter(span => (span as HTMLElement).style.backgroundColor.includes('--dsh-fork-graph'))
+    expect(badges).toHaveLength(1)
+    // The badge carries the branch icon (official IconBranchOutline16).
+    expect(badges[0]?.querySelector('svg')).not.toBeNull()
     // The label carries the full text for the CSS tooltip.
     const label = mounted.container.querySelector('[data-full="second turn"]')
     expect(label).not.toBeNull()
@@ -216,13 +219,24 @@ describe('BranchGraphView CSS contract (source text)', () => {
     expect(css).toMatch(/transition: opacity/)
   })
 
-  test('rows hover, the HEAD row is the current treatment, and pills carry dots', () => {
+  test('rows hover, the HEAD row is the current treatment, and badges are solid vscode chips', () => {
     expect(css).toContain('.historyItem:hover')
+    // Trajectory-tab alignment: xs-13 token + secondary label color, and
+    // the interactive hover alias.
+    expect(css).toContain('font: var(--dsw-font-xs-13)')
+    expect(css).toContain('color: var(--dsw-alias-label-secondary)')
+    expect(css).toContain('interactive-bg-hover')
     expect(css).toContain('.current .label')
-    expect(css).toContain('font-weight: 600')
-    expect(css).toContain('.refDot')
+    expect(css).toContain('dsw-font-xs-strong-13')
+    // vscode badge recipe: 10px radius, no border, ref name ellipsized.
+    expect(css).toContain('border-radius: 10px')
+    expect(css).toContain('.refName')
+    expect(css).not.toContain('refDot')
     expect(css).toContain('.skeletonRow')
     expect(css).toContain('@keyframes skeleton-pulse')
+    // Trajectory row rhythm: 38px rows and skeleton.
+    expect(css).toContain('min-height: 38px')
+    expect(css).toContain('height: 38px')
   })
 
   test('the dangling section is dashed and demoted, not hidden', () => {

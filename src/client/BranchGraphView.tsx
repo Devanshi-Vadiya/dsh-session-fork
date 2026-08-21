@@ -6,16 +6,20 @@
  * session's latest turn as the HEAD double ring.
  *
  * P4 polish on top: theme-following palette (dark-theme override in the CSS
- * module), colored ref pills whose dot carries the branch's lane color, a
- * bold `current` treatment on the HEAD row, fade-in full-text tooltip on
- * ellipsized labels, a loading skeleton, and a retry affordance in the
- * error state.
+ * module), solid vscode-style ref badges (lane-color fill, branch icon +
+ * name, per scmHistoryViewPane._renderBadge), a strong `current` treatment
+ * on the HEAD row, fade-in full-text tooltip on ellipsized labels, a
+ * loading skeleton, and a retry affordance in the error state. Shared
+ * chrome (row rhythm, typography, hover) follows the official trajectory
+ * tab (user decision, 2026-08-21); branch-specific elements follow the
+ * vscode Source Control Graph source.
  * @module dsh-session-fork/src/client/BranchGraphView
  */
 
 import { useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import { IconBranchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { rowLaneColor, toGraphHistoryModel, type GraphPayloadDto, type GraphRpcResult } from './graph-model.ts'
 import { NS } from './locales.ts'
 import {
@@ -51,19 +55,30 @@ function GraphRow({ viewModel }: { readonly viewModel: ISCMHistoryItemViewModel 
     return () => { host.replaceChildren() }
   }, [viewModel])
   const references = viewModel.historyItem.references ?? []
-  const dotColor = asCssVariable(rowLaneColor(viewModel) ?? 'scmGraph.historyItemRefColor')
+  // The badge fill: the row's lane color (vscode paints refs with their
+  // own swimlane color; the fallback mirrors the renderer's default).
+  const badgeColor = asCssVariable(rowLaneColor(viewModel) ?? 'scmGraph.historyItemRefColor')
   return (
     <div className={viewModel.kind === 'HEAD' ? `${css.historyItem} ${css.current}` : css.historyItem}>
       <div className={css.graphContainer} ref={container} />
       <span className={css.label} data-full={viewModel.historyItem.subject}>
         {viewModel.historyItem.subject}
       </span>
-      {references.map(ref => (
-        <span key={ref.id} className={css.ref}>
-          <span className={css.refDot} style={{ background: dotColor }} />
-          {ref.name}
-        </span>
-      ))}
+      {references.length > 0 && (
+        <div className={css.labelContainer}>
+          {references.map(ref => (
+            <span
+              key={ref.id}
+              className={css.ref}
+              style={{ backgroundColor: badgeColor }}
+              title={ref.name}
+            >
+              <span className={css.refIcon}><IconBranchOutline16 size={12} /></span>
+              <span className={css.refName}>{ref.name}</span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
