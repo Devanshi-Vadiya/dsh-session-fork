@@ -65,6 +65,8 @@ export interface RegistryBranchDto {
   readonly name: string
   readonly sessionId: string
   readonly dangling: boolean
+  /** Fork lineage (host `BranchSnapshot.forkOrigin`); null on root branches. */
+  readonly forkOrigin?: { readonly parentSessionId: string; readonly atSeq: number } | null
 }
 
 /** Result of the mapping: vscode history items plus the HEAD ref. */

@@ -21,6 +21,11 @@ export type ForkLocaleKey =
   | 'menu.fork'
   | 'menu.squash'
   | 'toast.forked'
+  | 'toast.squashed'
+  | 'squash.title'
+  | 'squash.description'
+  | 'squash.placeholder'
+  | 'squash.confirm'
   | 'fork.title'
   | 'fork.description'
   | 'fork.placeholder'
@@ -49,6 +54,11 @@ export const zh: Record<ForkLocaleKey, string> = {
   'menu.fork': '从此处 Fork',
   'menu.squash': 'Squash 到分支',
   'toast.forked': '已创建分支 ',
+  'toast.squashed': '已 squash 到分支 ',
+  'squash.title': 'Squash 到分支',
+  'squash.description': '输入目标分支名(当前仅支持本分支的父分支),本分支的独有历史将压缩为一条摘要合并过去。',
+  'squash.placeholder': 'squash 到 ',
+  'squash.confirm': 'Squash',
   'fork.title': 'Fork 到命名分支',
   'fork.description': '分支名将成为新会话的标题,且在本工作区内唯一。',
   'fork.placeholder': '分支名',
@@ -71,6 +81,11 @@ export const en: Record<ForkLocaleKey, string> = {
   'menu.fork': 'Fork from here',
   'menu.squash': 'Squash into branch',
   'toast.forked': 'Forked branch ',
+  'toast.squashed': 'Squashed into branch ',
+  'squash.title': 'Squash into branch',
+  'squash.description': 'Enter the target branch name (currently the parent branch of this one); this branch\u2019s own history is squashed into one summary there.',
+  'squash.placeholder': 'squash into ',
+  'squash.confirm': 'Squash',
   'fork.title': 'Fork to a named branch',
   'fork.description': 'The branch name becomes the new session\u2019s title and must be unique in this workspace.',
   'fork.placeholder': 'Branch name',

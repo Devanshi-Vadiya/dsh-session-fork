@@ -98,7 +98,20 @@ export async function executeSquashAction(
   if (action.kind === 'usage') {
     return { kind: 'error', text: `${action.problem}\n${SQUASH_USAGE}` }
   }
+  return executeSquash(action.target, deps)
+}
 
+/**
+ * The squash pipeline proper (issue #8: extracted so the RPC `squash`
+ * endpoint reuses the exact command semantics): idle gate, lineage,
+ * registry target check, post-fork range, vendored compaction, merge
+ * checkpoint append into the parent, durability flush. Pure over the
+ * injected agents and capabilities — never throws business failures.
+ */
+export async function executeSquash(
+  target: string,
+  deps: SquashCommandDeps,
+): Promise<BranchCommandResult> {
   // Idle gate: the vendored shell re-checks through runMaintenance, but a
   // fast local check gives the squash-specific wording immediately.
   if (deps.childAgent.phase.kind !== 'idle') {
@@ -119,14 +132,14 @@ export async function executeSquashAction(
   const state = await loadRegistry(deps.store)
   let targetSessionId: string
   try {
-    targetSessionId = getBranch(state, action.target).sessionId
+    targetSessionId = getBranch(state, target).sessionId
   } catch {
-    return { kind: 'error', text: unknownBranch(action.target) }
+    return { kind: 'error', text: unknownBranch(target) }
   }
   if (targetSessionId !== parentSessionId) {
     return {
       kind: 'error',
-      text: `branch '${action.target}' is not this session's parent — squash into the branch this session was forked from`,
+      text: `branch '${target}' is not this session's parent — squash into the branch this session was forked from`,
     }
   }
 
@@ -201,6 +214,6 @@ export async function executeSquashAction(
 
   return {
     kind: 'success',
-    text: `Squashed ${result.shadowedSeqs.length} surface nodes (~${result.shadowedTokenCount} tokens) into branch '${action.target}' as one checkpoint.`,
+    text: `Squashed ${result.shadowedSeqs.length} surface nodes (~${result.shadowedTokenCount} tokens) into branch '${target}' as one checkpoint.`,
   }
 }

@@ -11,7 +11,7 @@
  * @module dsh-session-fork/tests/branch-view.test
  */
 
-import { beforeAll, afterAll, describe, expect, test } from 'bun:test'
+import { beforeAll, afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -21,6 +21,7 @@ import {
   rowLaneColor,
   type GraphPayloadDto,
   type GraphRpcResult,
+  type RegistryBranchDto,
   type TurnEventsPayloadDto,
 } from '../src/client/graph-model.ts'
 import { toISCMHistoryItemViewModelArray } from '../src/client/vendor/vscode/scm-history.ts'
@@ -54,7 +55,7 @@ interface Mounted {
   readonly container: HTMLElement
 }
 
-const NO_DANGLING: Promise<GraphRpcResult<readonly string[]>> =
+const NO_BRANCHES: Promise<GraphRpcResult<readonly RegistryBranchDto[]>> =
   Promise.resolve({ ok: true, value: [] })
 
 const NO_EVENTS: Promise<GraphRpcResult<TurnEventsPayloadDto>> =
@@ -65,20 +66,26 @@ const NO_FORK: Promise<GraphRpcResult<{ readonly sessionId: string }>> = Promise
   error: { code: 'internal', message: 'unused' },
 })
 
+const NO_SQUASH: Promise<GraphRpcResult<{ readonly message: string }>> = Promise.resolve({
+  ok: false,
+  error: { code: 'internal', message: 'unused' },
+})
+
 const SILENT_DIALOG: ViewProps['requestBranchName'] = () => Promise.resolve(undefined)
 
 function mount(
   loadGraph: ViewProps['loadGraph'],
-  loadDangling: ViewProps['loadDangling'] = () => NO_DANGLING,
+  loadBranches: ViewProps['loadBranches'] = () => NO_BRANCHES,
   loadTurnEvents: ViewProps['loadTurnEvents'] = () => NO_EVENTS,
   createBranch: ViewProps['createBranch'] = () => NO_FORK,
   requestBranchName: ViewProps['requestBranchName'] = SILENT_DIALOG,
+  squashBranch: ViewProps['squashBranch'] = () => NO_SQUASH,
 ): Mounted {
   const container = window.document.createElement('div')
   window.document.body.appendChild(container)
   const root = createRoot(container)
   const props = {
-    sessionId: 's-view', loadGraph, loadDangling, loadTurnEvents, createBranch, requestBranchName, t,
+    sessionId: 's-view', loadGraph, loadBranches, loadTurnEvents, createBranch, requestBranchName, squashBranch, t,
   } as unknown as ViewProps
   act(() => { root.render(<BranchGraphView {...props} />) })
   return { root, container }
@@ -161,7 +168,13 @@ describe('BranchGraphView states', () => {
   test('dangling branches render as a distinct demoted section', async () => {
     const mounted = mount(
       () => Promise.resolve(resultOf({ nodes: [], head: null })),
-      () => Promise.resolve({ ok: true, value: ['ghost', 'wip'] }),
+      () => Promise.resolve({
+        ok: true,
+        value: [
+          { name: 'ghost', sessionId: 's-1', dangling: true },
+          { name: 'wip', sessionId: 's-2', dangling: true },
+        ] as readonly RegistryBranchDto[],
+      }),
     )
     await flush()
     expect(mounted.container.textContent).toContain('#state.dangling')
@@ -218,7 +231,7 @@ describe('row expansion (issue #8)', () => {
     const calls: Array<{ sessionId: string, turn: number }> = []
     const mounted = mount(
       () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
-      () => NO_DANGLING,
+      () => NO_BRANCHES,
       (sessionId, turn) => {
         calls.push({ sessionId, turn })
         return Promise.resolve({ ok: true, value: EVENTS })
@@ -249,7 +262,7 @@ describe('row expansion (issue #8)', () => {
     let calls = 0
     const mounted = mount(
       () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
-      () => NO_DANGLING,
+      () => NO_BRANCHES,
       () => {
         calls += 1
         return Promise.resolve({ ok: true, value: EVENTS })
@@ -275,7 +288,7 @@ describe('row expansion (issue #8)', () => {
   test('a failing event fetch renders the error line inside the expansion', async () => {
     const mounted = mount(
       () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
-      () => NO_DANGLING,
+      () => NO_BRANCHES,
       () => Promise.resolve({ ok: false, error: { code: 'internal', message: 'no turn 2' } }),
     )
     await flush()
@@ -327,7 +340,7 @@ describe('row context menu + fork from here (issue #8)', () => {
     })
   }
 
-  test('right-click opens the menu at the pointer; squash is a disabled placeholder', async () => {
+  test('right-click opens the menu at the pointer; squash stays disabled without lineage', async () => {
     const mounted = mount(() => Promise.resolve(resultOf(EXPANDABLE_GRAPH2)))
     await flush()
     expect(mounted.container.querySelector('[role="menu"]')).toBeNull()
@@ -356,7 +369,7 @@ describe('row context menu + fork from here (issue #8)', () => {
         graphCalls += 1
         return Promise.resolve(resultOf(EXPANDABLE_GRAPH2))
       },
-      () => NO_DANGLING,
+      () => NO_BRANCHES,
       () => NO_EVENTS,
       async (request) => {
         if (request.name !== 'experiment') {
@@ -392,7 +405,7 @@ describe('row context menu + fork from here (issue #8)', () => {
     let forkCalls = 0
     const mounted = mount(
       () => Promise.resolve(resultOf(EXPANDABLE_GRAPH2)),
-      () => NO_DANGLING,
+      () => NO_BRANCHES,
       () => NO_EVENTS,
       async () => {
         forkCalls += 1
@@ -497,5 +510,139 @@ describe('BranchGraphView CSS contract (source text)', () => {
     expect(css).toContain('.danglingRef')
     expect(css).toContain('1px dashed')
     expect(css).toContain('opacity: 0.7')
+  })
+})
+
+describe('squash into branch (issue #8)', () => {
+  // Portal-level assertions need a clean body: earlier tests' containers
+  // (and any toast they left mid-fade) stay in this shared happy-dom body.
+  beforeEach(() => {
+    window.document.body.replaceChildren()
+  })
+
+  /** Root rows (s-a) and forked-child rows (s-b) in one graph. */
+  const LINEAGE_GRAPH: GraphPayloadDto = {
+    nodes: [
+      {
+        id: 's-b:1', parentIds: ['s-a:2'], subject: 'experiment turn',
+        sessionId: 's-b', turn: 1, endSeq: 12,
+      },
+      { id: 's-a:2', parentIds: ['s-a:1'], subject: 'root second', sessionId: 's-a', turn: 2, endSeq: 9 },
+      { id: 's-a:1', parentIds: [], subject: 'root first', sessionId: 's-a', turn: 1, endSeq: 3 },
+    ],
+    head: 's-b:1',
+  }
+
+  const LINEAGE_BRANCHES: readonly RegistryBranchDto[] = [
+    { name: 'main', sessionId: 's-a', dangling: false, forkOrigin: null },
+    { name: 'exp', sessionId: 's-b', dangling: false, forkOrigin: { parentSessionId: 's-a', atSeq: 9 } },
+  ]
+
+  const LINEAGE_LOAD: ViewProps['loadBranches'] = () =>
+    Promise.resolve({ ok: true, value: LINEAGE_BRANCHES })
+
+  function contextMenuOn(mounted: Mounted, subject: string): void {
+    const row = [...mounted.container.querySelectorAll('[role="button"]')]
+      .find(element => element.textContent?.includes(subject))
+    if (row === undefined) throw new Error(`row with "${subject}" not found`)
+    act(() => {
+      row.dispatchEvent(new window.MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: 10, clientY: 20,
+      }))
+    })
+  }
+
+  function menuItems(): HTMLButtonElement[] {
+    return [...window.document.querySelectorAll('[role="menuitem"]')] as HTMLButtonElement[]
+  }
+
+  test('squash is enabled on forked-session rows and disabled on root rows', async () => {
+    const mounted = mount(
+      () => Promise.resolve(resultOf(LINEAGE_GRAPH)),
+      LINEAGE_LOAD,
+    )
+    await flush()
+    contextMenuOn(mounted, 'experiment turn')
+    const squashChild = menuItems()[1]
+    expect(squashChild?.disabled).toBe(false)
+    await act(async () => { mounted.root.unmount() })
+
+    const mountedRoot = mount(
+      () => Promise.resolve(resultOf(LINEAGE_GRAPH)),
+      LINEAGE_LOAD,
+    )
+    await flush()
+    contextMenuOn(mountedRoot, 'root second')
+    const squashRoot = menuItems()[1]
+    expect(squashRoot?.disabled).toBe(true)
+    await act(async () => { mountedRoot.root.unmount() })
+  })
+
+  test('squash flow: dialog texts name the parent, target goes to the wire, refresh + toast', async () => {
+    let graphCalls = 0
+    const squashCalls: Array<{ sessionId: string, target: string }> = []
+    const textsSeen: unknown[] = []
+    const requestBranchName: ViewProps['requestBranchName'] = async (submit, texts) => {
+      textsSeen.push(texts)
+      const outcome = await submit('main')
+      return outcome.ok ? { sessionId: outcome.sessionId } : undefined
+    }
+    const mounted = mount(
+      () => {
+        graphCalls += 1
+        return Promise.resolve(resultOf(LINEAGE_GRAPH))
+      },
+      LINEAGE_LOAD,
+      () => NO_EVENTS,
+      () => NO_FORK,
+      requestBranchName,
+      async (request) => {
+        squashCalls.push({ sessionId: request.sessionId, target: request.target })
+        return { ok: true, value: { message: 'Squashed 2 surface nodes into branch \'main\'.' } }
+      },
+    )
+    await flush()
+    contextMenuOn(mounted, 'experiment turn')
+    await act(async () => { menuItems()[1]?.click() })
+    await flush()
+    await flush()
+    expect(squashCalls).toEqual([{ sessionId: 's-b', target: 'main' }])
+    expect(textsSeen[0]).toMatchObject({
+      title: '#squash.title',
+      placeholder: '#squash.placeholdermain',
+      confirm: '#squash.confirm',
+    })
+    expect(graphCalls).toBe(2)
+    expect(window.document.body.textContent).toContain('#toast.squashedmain')
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('a host rejection surfaces through the dialog bridge: no toast, no refresh', async () => {
+    let graphCalls = 0
+    const requestBranchName: ViewProps['requestBranchName'] = async (submit) => {
+      const outcome = await submit('other')
+      return outcome.ok ? { sessionId: outcome.sessionId } : undefined
+    }
+    const mounted = mount(
+      () => {
+        graphCalls += 1
+        return Promise.resolve(resultOf(LINEAGE_GRAPH))
+      },
+      LINEAGE_LOAD,
+      () => NO_EVENTS,
+      () => NO_FORK,
+      requestBranchName,
+      async () => ({
+        ok: false,
+        error: { code: 'internal', message: "branch 'other' is not this session's parent" },
+      }),
+    )
+    await flush()
+    contextMenuOn(mounted, 'experiment turn')
+    await act(async () => { menuItems()[1]?.click() })
+    await flush()
+    expect(graphCalls).toBe(1)
+    expect(window.document.body.textContent).not.toContain('#toast.squashed')
+    await act(async () => { mounted.root.unmount() })
   })
 })

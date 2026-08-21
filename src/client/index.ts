@@ -168,22 +168,30 @@ export function apply(ctx: Context): void {
           connection.rpc.call(RPC_CHANNEL, 'turnEvents', { sessionId: rowSessionId, turn }, signal)
         return result as Promise<GraphRpcResult<TurnEventsPayloadDto>>
       },
-      // The registry snapshot rides along for the dangling-branch section
-      // (a branch whose session vanished renders distinctly, not hidden).
-      loadDangling: (signal?: AbortSignal): Promise<GraphRpcResult<readonly string[]>> => {
+      // The registry snapshot feeds the dangling-branch section (a branch
+      // whose session vanished renders distinctly, not hidden) and the
+      // fork-lineage facts that gate the squash menu item (issue #8).
+      loadBranches: (signal?: AbortSignal): Promise<GraphRpcResult<readonly RegistryBranchDto[]>> => {
         if (connection === undefined) return Promise.resolve(graphUnavailable())
         const call: Promise<GraphRpcResult> =
           connection.rpc.call(RPC_CHANNEL, 'registry', { sessionId }, signal)
-        return call.then((result): GraphRpcResult<readonly string[]> => {
+        return call.then((result): GraphRpcResult<readonly RegistryBranchDto[]> => {
           if (!result.ok) return result
           const value = result.value as { branches: readonly RegistryBranchDto[] }
-          return {
-            ok: true,
-            value: value.branches
-              .filter(branch => branch.dangling)
-              .map(branch => branch.name),
-          }
+          return { ok: true, value: value.branches }
         })
+      },
+      // Right-click "Squash into branch" (issue #8): the host `squash`
+      // endpoint; failures carry user-facing text for the dialog's row.
+      squashBranch: (request: {
+        readonly sessionId: string
+        readonly target: string
+      }): Promise<GraphRpcResult<{ readonly message: string }>> => {
+        if (connection === undefined) return Promise.resolve(graphUnavailable())
+        const result: Promise<GraphRpcResult> = connection.rpc.call(
+          RPC_CHANNEL, 'squash', { sessionId: request.sessionId, target: request.target },
+        )
+        return result as Promise<GraphRpcResult<{ readonly message: string }>>
       },
     }),
   }, BranchGraphView))

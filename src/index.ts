@@ -419,6 +419,32 @@ export async function apply(ctx: Context): Promise<void> {
             sessionExists: (id) => sessionExists(ctx, id),
           }, atSeq === undefined ? {} : { atSeq })
         },
+        // The right-click squash action (issue #8): the same execution
+        // capabilities the /squash command handler injects. Child-agent
+        // resolution is live-first; a cold session resumes through the
+        // vendored ensureSession kernel — resume, never create (2026-08-21
+        // squash 定案), and the resumed agent is flushed after the write
+        // but never destroyed here (it stays registered for later reads).
+        squash: {
+          async resolveChildAgent(sessionId) {
+            const live = ctx.agents.get(sessionId as Session['id'])
+            if (live !== undefined) return live as SquashAgent
+            try {
+              return await getOrResumeAgent(
+                getOrResumeDeps(ctx), sessionId as Session['id'],
+              ) as SquashAgent
+            } catch {
+              return null
+            }
+          },
+          openStore: (workspaceKey) =>
+            createDomainStore(domain as unknown as DomainLike, workspaceKey),
+          compact: (agent, signal, request) =>
+            compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
+          resolveParentAgent: (sessionId) =>
+            getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<SquashAgent>,
+          flush: (agent) => ctx.sessions.flush(agent.session),
+        },
       }
       yield registerRpcChannel(connection, createBranchRpcHandler(rpcPorts))
     }

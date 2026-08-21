@@ -29,6 +29,7 @@ import {
   toGraphHistoryModel,
   type GraphPayloadDto,
   type GraphRpcResult,
+  type RegistryBranchDto,
   type TurnEventRowDto,
   type TurnEventsPayloadDto,
 } from './graph-model.ts'
@@ -45,8 +46,12 @@ import css from './BranchGraphView.module.css'
 export interface BranchGraphInjected {
   /** Load the workspace branch graph anchored at one session. */
   loadGraph(signal?: AbortSignal): Promise<GraphRpcResult<GraphPayloadDto>>
-  /** Load the workspace's dangling branch names (registry liveness view). */
-  loadDangling(signal?: AbortSignal): Promise<GraphRpcResult<readonly string[]>>
+  /**
+   * Load the workspace's branch rows (registry liveness + fork lineage):
+   * dangling names feed the demoted section, `forkOrigin` decides which
+   * rows offer the squash action (issue #8).
+   */
+  loadBranches(signal?: AbortSignal): Promise<GraphRpcResult<readonly RegistryBranchDto[]>>
   /**
    * Load one turn's full event list for row expansion (issue #8): every
    * event of the turn span, each with a one-line summary text.
@@ -65,6 +70,15 @@ export interface BranchGraphInjected {
     readonly sessionId: string
     readonly atSeq?: number
   }): Promise<GraphRpcResult<{ readonly sessionId: string }>>
+  /**
+   * Right-click "Squash into branch" (issue #8): one host `squash` round
+   * trip; the host keeps the command's lineage constraint (the target
+   * must own this session's parent), so failures carry user-facing text.
+   */
+  squashBranch(request: {
+    readonly sessionId: string
+    readonly target: string
+  }): Promise<GraphRpcResult<{ readonly message: string }>>
   /**
    * Open the shared branch-name dialog (the same controller the fork
    * interception uses); resolves the accepted outcome, undefined on cancel.
@@ -233,29 +247,50 @@ interface RowMenu {
   readonly x: number
   readonly y: number
   readonly meta: RowMeta
+  /** Squash lineage facts of the row's session, when it has a fork origin. */
+  readonly squashTarget: { readonly parentSessionId: string; readonly parentName: string } | null
 }
 
 /** The branches graph tab body: loads over RPC, then renders the lanes. */
 export function BranchGraphView({
   sessionId,
   loadGraph,
-  loadDangling,
+  loadBranches,
   loadTurnEvents,
   createBranch,
+  squashBranch,
   requestBranchName,
   t,
 }: ViewProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' })
   const [metaById, setMetaById] = useState<ReadonlyMap<string, RowMeta>>(new Map())
-  const [dangling, setDangling] = useState<readonly string[]>([])
+  const [branches, setBranches] = useState<readonly RegistryBranchDto[]>([])
   const [attempt, setAttempt] = useState(0)
   const [menu, setMenu] = useState<RowMenu | null>(null)
   const [toast, setToast] = useState<{ readonly seq: number; readonly text: string } | null>(null)
   const toastSeq = useRef(0)
 
+  // Dangling names are a view over the branch rows (demoted section).
+  const dangling = branches.filter(branch => branch.dangling).map(branch => branch.name)
+
   const showToast = (text: string): void => {
     toastSeq.current += 1
     setToast({ seq: toastSeq.current, text })
+  }
+
+  /**
+   * Squash lineage of one session, from the registry rows: the fork
+   * origin plus the parent branch's display name (null on root branches —
+   * their rows keep the squash item disabled).
+   */
+  const squashTargetOf = (
+    sessionId: string,
+  ): { readonly parentSessionId: string; readonly parentName: string } | null => {
+    const origin = branches.find(branch => branch.sessionId === sessionId)?.forkOrigin
+    if (origin === undefined || origin === null) return null
+    const parent = branches.find(branch => branch.sessionId === origin.parentSessionId)
+    if (parent === undefined) return null
+    return { parentSessionId: origin.parentSessionId, parentName: parent.name }
   }
 
   /**
@@ -289,11 +324,38 @@ export function BranchGraphView({
     })
   }
 
+  /**
+   * "Squash into branch" (issue #8): collect the target branch name
+   * through the shared dialog (placeholder names the parent branch; the
+   * input stays free-form for the future any-two-branches squash), then
+   * run the host `squash` endpoint. The host keeps the command's lineage
+   * constraint and returns readable failures for the dialog's error row;
+   * success refreshes the graph and toasts.
+   */
+  const squashFromRow = (meta: RowMeta, parentName: string): void => {
+    let acceptedTarget = ''
+    void requestBranchName(async (candidate) => {
+      const result = await squashBranch({ sessionId: meta.sessionId, target: candidate })
+      if (!result.ok) return { ok: false, message: result.error.message }
+      acceptedTarget = candidate
+      return { ok: true, sessionId: meta.sessionId }
+    }, {
+      title: t('squash.title'),
+      description: t('squash.description'),
+      placeholder: `${t('squash.placeholder')}${parentName}`,
+      confirm: t('squash.confirm'),
+    }).then((accepted) => {
+      if (accepted === undefined) return
+      setAttempt(current => current + 1)
+      showToast(`${t('toast.squashed')}${acceptedTarget}`)
+    })
+  }
+
   useEffect(() => {
     const controller = new AbortController()
     setState({ kind: 'loading' })
     setMetaById(new Map())
-    setDangling([])
+    setBranches([])
     loadGraph(controller.signal).then(
       (result) => {
         if (controller.signal.aborted) return
@@ -322,17 +384,17 @@ export function BranchGraphView({
         setState({ kind: 'error', message: error instanceof Error ? error.message : String(error) })
       },
     )
-    // The dangling view is best-effort: a failing registry call must never
+    // The registry view is best-effort: a failing registry call must never
     // take the graph down (the graph endpoint already omits dead sessions).
-    loadDangling(controller.signal).then(
+    loadBranches(controller.signal).then(
       (result) => {
         if (controller.signal.aborted || !result.ok) return
-        setDangling(result.value)
+        setBranches(result.value)
       },
       () => { /* best-effort */ },
     )
     return () => { controller.abort() }
-  }, [sessionId, loadGraph, loadDangling, attempt])
+  }, [sessionId, loadGraph, loadBranches, attempt])
 
   if (state.kind === 'loading') {
     return (
@@ -358,11 +420,15 @@ export function BranchGraphView({
   if (state.rows.length === 0 && dangling.length === 0) {
     return <div className={css.state}>{t('state.empty')}</div>
   }
-  const menuEntries: readonly MenuEntry[] = [
+  const menuEntries: readonly MenuEntry[] = menu === null ? [] : [
     { id: 'fork', label: t('menu.fork') },
-    // Squash lands in the next stage (issue #8 P4 host endpoint); the row
-    // is a visible placeholder so the menu shape is already final.
-    { id: 'squash', label: t('menu.squash'), disabled: true },
+    // Squash is offered only on rows whose session has a fork origin —
+    // root-branch rows keep the item visible but disabled.
+    {
+      id: 'squash',
+      label: t('menu.squash'),
+      disabled: menu.squashTarget === null,
+    },
   ]
   return (
     <div className={css.graph}>
@@ -373,7 +439,12 @@ export function BranchGraphView({
           meta={metaById.get(row.historyItem.id)}
           loadTurnEvents={loadTurnEvents}
           onContextMenu={(event, meta) => {
-            setMenu({ x: event.clientX, y: event.clientY, meta })
+            setMenu({
+              x: event.clientX,
+              y: event.clientY,
+              meta,
+              squashTarget: squashTargetOf(meta.sessionId),
+            })
           }}
           t={t}
         />
@@ -397,7 +468,11 @@ export function BranchGraphView({
         onSelect={(id) => {
           const current = menu
           setMenu(null)
-          if (id === 'fork' && current !== null) forkFromRow(current.meta)
+          if (current === null) return
+          if (id === 'fork') forkFromRow(current.meta)
+          if (id === 'squash' && current.squashTarget !== null) {
+            squashFromRow(current.meta, current.squashTarget.parentName)
+          }
         }}
         onClose={() => { setMenu(null) }}
       />
