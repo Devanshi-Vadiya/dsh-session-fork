@@ -402,7 +402,9 @@ async function resolveForkAnchor(
  *   (create and adopt records are equal citizens).
  * - Lineage: turns chain naturally inside a session; a forked child's
  *   first own turn additionally parents to the fork anchor turn (the
- *   right-jump lane in the vscode renderer). Unreadable sessions and
+ *   right-jump lane in the vscode renderer). A squash row additionally
+ *   parents to the merged child branch's head (the merge-join lane);
+ *   unregistered children degrade by omission. Unreadable sessions and
  *   anchors that resolve outside the branch set degrade by omission.
  * - Rows carry the branch names whose head lands on them; `head` marks the
  *   payload session's latest own turn (the HEAD double ring).
@@ -444,6 +446,15 @@ export async function assembleBranchGraph(
       const parentIds: string[] = []
       if (previous !== undefined) parentIds.push(sliceId(sessionId, previous))
       if (index === 0 && anchorId !== null) parentIds.push(anchorId)
+      // A squash row is merge-shaped: the merged child's head is its second
+      // parent, so the renderer draws the joining lane (vscode merge curve).
+      // Only a registered child branch resolves — an unregistered child
+      // (squash's header-lineage fallback) degrades by omission, matching
+      // how unreadable sessions and outside anchors degrade (user decision).
+      if (turn.squashOf !== undefined) {
+        const childHead = ownTurns.get(turn.squashOf)?.at(-1)
+        if (childHead !== undefined) parentIds.push(sliceId(turn.squashOf, childHead))
+      }
       const id = sliceId(sessionId, turn)
       mutableNodes.push({
         id,

@@ -311,11 +311,11 @@ describe('assembleBranchGraph', () => {
     expect(graph.head).toBeNull()
   })
 
-  test('a squash row chains on the parent branch like an ordinary commit', async () => {
+  test('a squash row parents to both the previous parent-branch row and the child branch head', async () => {
     // Root gets a /squash merge checkpoint after its turns (from the child
-    // branch), then another human turn. The squash row parents to the
-    // previous root row and is itself the parent of what follows — an
-    // ordinary single-parent chain, ids s-prefixed by seq.
+    // branch), then another human turn. The squash row is merge-shaped: it
+    // parents to the previous root row AND the registered child branch's
+    // head (the merge-join lane), ids s-prefixed by seq.
     const rootTurns = sessionEvents([
       { turn: 1, subject: 'first', time: 10 },
       { turn: 2, subject: 'second', time: 20 },
@@ -335,9 +335,10 @@ describe('assembleBranchGraph', () => {
       },
       ...later,
     ]
+    const childEvents = sessionEvents([{ turn: 1, subject: 'experiment', time: 25 }])
     const logs = new Map<string, GraphSessionLog>([
       ['s-root', { header: {}, events: rootEvents }],
-      ['s-child', { header: { seedLength: 0, parentSession: 's-root' }, events: [] }],
+      ['s-child', { header: { seedLength: 0, parentSession: 's-root' }, events: childEvents }],
     ])
     const branches: BranchLike[] = [
       { name: 'main', sessionId: 's-root', forkOrigin: null },
@@ -346,8 +347,37 @@ describe('assembleBranchGraph', () => {
     const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
     const byId = new Map(graph.nodes.map(node => [node.id, node]))
     expect(byId.get('s-root:s6')?.subject).toBe('exp conclusion')
-    expect(byId.get('s-root:s6')?.parentIds).toEqual(['s-root:2'])
+    expect(byId.get('s-root:s6')?.parentIds).toEqual(['s-root:2', 's-child:1'])
     expect(byId.get('s-root:3')?.parentIds).toEqual(['s-root:s6'])
+  })
+
+  test('a squash row degrades to single-parent when the child is not a registered branch', async () => {
+    // Same shape, but the checkpoint's childSessionId names a session no
+    // branch record points at: its rows are absent from the graph, so the
+    // merge-join parent resolves to nothing and the row stays on the parent
+    // chain only.
+    const rootTurns = sessionEvents([{ turn: 1, subject: 'first', time: 10 }])
+    const rootEvents: GraphEvent[] = [
+      ...rootTurns,
+      {
+        seq: rootTurns.length, type: 'user/message', time: 20,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'stray conclusion' }],
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-unregistered', compactionId: 'c2' },
+        },
+      },
+    ]
+    const logs = new Map<string, GraphSessionLog>([
+      ['s-root', { header: {}, events: rootEvents }],
+    ])
+    const branches: BranchLike[] = [
+      { name: 'main', sessionId: 's-root', forkOrigin: null },
+    ]
+    const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
+    const byId = new Map(graph.nodes.map(node => [node.id, node]))
+    expect(byId.get('s-root:s3')?.subject).toBe('stray conclusion')
+    expect(byId.get('s-root:s3')?.parentIds).toEqual(['s-root:1'])
   })
 
   test('timestamp-less logs order deterministically by branch order then seq', async () => {
