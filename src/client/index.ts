@@ -21,7 +21,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // registration) must be in the program for the overlay register call to type.
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { BranchGraphView, type BranchGraphInjected } from './BranchGraphView.tsx'
-import { createForkNameDialog, ForkNameDialog, type ForkTranslate } from './fork-name-dialog.tsx'
+import {
+  BranchNameDialog,
+  createBranchNameDialog,
+  type BranchDialogTranslate,
+} from './branch-name-dialog.tsx'
 import {
   installForkIntercept,
   type ForkEndpointResult,
@@ -33,6 +37,7 @@ import {
   type GraphPayloadDto,
   type GraphRpcResult,
   type RegistryBranchDto,
+  type TurnEventsPayloadDto,
 } from './graph-model.ts'
 import { en, NS, zh } from './locales.ts'
 
@@ -95,8 +100,11 @@ export function apply(ctx: Context): void {
   // turn-tail branch button) and route them through the name dialog and
   // the host-side `fork` endpoint. Without the connection service (a
   // non-web host) the patch stays off and official behavior is untouched.
+  // One shared controller backs every branch-naming surface: the fork
+  // interception (issue #3) and the graph's right-click actions (issue
+  // #8) — the overlay below renders whatever request is open.
+  const dialog = createBranchNameDialog()
   if (connection !== undefined) {
-    const dialog = createForkNameDialog()
     installForkIntercept({
       sessions,
       requestName: dialog.requestName,
@@ -108,13 +116,13 @@ export function apply(ctx: Context): void {
     })
     // The dialog mounts as a root-scope overlay entry: the shell's own
     // full-app overlay hole (declared by ui-layout's AppFrame), rendering
-    // nothing unless a fork request is open.
+    // nothing unless a request is open.
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({
       name: 'shell.overlay',
       id: 'fork-name-dialog',
       locale: NS,
-      inject: () => ({ controller: dialog, t: t as ForkTranslate }),
-    }, ForkNameDialog))
+      inject: () => ({ controller: dialog, t: t as BranchDialogTranslate }),
+    }, BranchNameDialog))
   }
 
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
@@ -130,22 +138,60 @@ export function apply(ctx: Context): void {
           connection.rpc.call(RPC_CHANNEL, 'graph', { sessionId }, signal)
         return result as Promise<GraphRpcResult<GraphPayloadDto>>
       },
-      // The registry snapshot rides along for the dangling-branch section
-      // (a branch whose session vanished renders distinctly, not hidden).
-      loadDangling: (signal?: AbortSignal): Promise<GraphRpcResult<readonly string[]>> => {
+      // Right-click "Fork from here" (issue #8): one host `fork` round
+      // trip with the row's endSeq as the atSeq anchor.
+      createBranch: (request: {
+        readonly name: string
+        readonly sessionId: string
+        readonly atSeq?: number
+      }): Promise<GraphRpcResult<{ readonly sessionId: string }>> => {
+        if (connection === undefined) return Promise.resolve(graphUnavailable())
+        const result: Promise<GraphRpcResult> = connection.rpc.call(RPC_CHANNEL, 'fork', {
+          sessionId: request.sessionId,
+          name: request.name,
+          ...(request.atSeq === undefined ? {} : { atSeq: request.atSeq }),
+        })
+        return result as Promise<GraphRpcResult<{ readonly sessionId: string }>>
+      },
+      // The shared branch-name dialog (same controller the fork
+      // interception uses; the overlay renders whichever request is open).
+      requestBranchName: dialog.requestName,
+      // Row expansion (issue #8): one turn's full event list, lightweight
+      // `{ seq, type, text }` rows summarized host-side.
+      loadTurnEvents: (
+        rowSessionId: string,
+        turn: number,
+        signal?: AbortSignal,
+      ): Promise<GraphRpcResult<TurnEventsPayloadDto>> => {
+        if (connection === undefined) return Promise.resolve(graphUnavailable())
+        const result: Promise<GraphRpcResult> =
+          connection.rpc.call(RPC_CHANNEL, 'turnEvents', { sessionId: rowSessionId, turn }, signal)
+        return result as Promise<GraphRpcResult<TurnEventsPayloadDto>>
+      },
+      // The registry snapshot feeds the dangling-branch section (a branch
+      // whose session vanished renders distinctly, not hidden) and the
+      // fork-lineage facts that gate the squash menu item (issue #8).
+      loadBranches: (signal?: AbortSignal): Promise<GraphRpcResult<readonly RegistryBranchDto[]>> => {
         if (connection === undefined) return Promise.resolve(graphUnavailable())
         const call: Promise<GraphRpcResult> =
           connection.rpc.call(RPC_CHANNEL, 'registry', { sessionId }, signal)
-        return call.then((result): GraphRpcResult<readonly string[]> => {
+        return call.then((result): GraphRpcResult<readonly RegistryBranchDto[]> => {
           if (!result.ok) return result
           const value = result.value as { branches: readonly RegistryBranchDto[] }
-          return {
-            ok: true,
-            value: value.branches
-              .filter(branch => branch.dangling)
-              .map(branch => branch.name),
-          }
+          return { ok: true, value: value.branches }
         })
+      },
+      // Right-click "Squash into branch" (issue #8): the host `squash`
+      // endpoint; failures carry user-facing text for the dialog's row.
+      squashBranch: (request: {
+        readonly sessionId: string
+        readonly target: string
+      }): Promise<GraphRpcResult<{ readonly message: string }>> => {
+        if (connection === undefined) return Promise.resolve(graphUnavailable())
+        const result: Promise<GraphRpcResult> = connection.rpc.call(
+          RPC_CHANNEL, 'squash', { sessionId: request.sessionId, target: request.target },
+        )
+        return result as Promise<GraphRpcResult<{ readonly message: string }>>
       },
     }),
   }, BranchGraphView))

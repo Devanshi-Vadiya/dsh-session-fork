@@ -27,11 +27,16 @@
  */
 
 import { z } from 'zod'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import { branchErrorMessage } from './command.js'
-import { assembleBranchGraph } from './graph.js'
+import { assembleBranchGraph, extractTurns, summarizeTurnEvents } from './graph.js'
 import type { BranchGraph, BranchLike, GraphNode, GraphNodeRef, GraphSessionLog } from './graph.js'
 import { listBranches } from './registry.js'
-import type { ForkOrigin, RegistryState, SessionExists } from './types.js'
+import { executeSquash } from './squash-command.js'
+import type { SquashAgent } from './squash-command.js'
+import type { ForkOrigin, RegistryState, RegistryStore, SessionExists } from './types.js'
+import type { CompactRegionRequest } from './vendor/compact.js'
 
 /** Channel path this plugin owns on the host connection registry. */
 export const RPC_CHANNEL = '/dsh-session-fork'
@@ -139,6 +144,56 @@ export interface ForkValue {
   readonly sessionId: string
 }
 
+/** Payload contract of the `turnEvents` endpoint (row expansion, issue #8). */
+const turnEventsPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  turn: z.number().int().nonnegative(),
+})
+
+/** Success value of the `turnEvents` endpoint: the turn's event rows. */
+export interface TurnEventsValue {
+  readonly events: readonly { readonly seq: number; readonly type: string; readonly text: string }[]
+}
+
+/** Payload contract of the `squash` endpoint (issue #8 right-click squash). */
+const squashPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  target: z.string().min(1),
+})
+
+/** Success value of the `squash` endpoint: the command-shaped summary. */
+export interface SquashValue {
+  readonly message: string
+}
+
+/**
+ * The squash execution capabilities the `squash` endpoint needs — the same
+ * injection face the `/squash` command handler feeds into
+ * {@link executeSquash}, minus the command-bound child agent.
+ */
+export interface SquashPorts {
+  /**
+   * Resolve the child agent of one session: live agent store first; a
+   * cold (never-live or closed) session resumes through the vendored
+   * kernel path — resume, never create (2026-08-21 squash 定案), and the
+   * resumed agent is flushed after the write but never destroyed.
+   * `null` when the session does not exist at all.
+   */
+  resolveChildAgent(sessionId: string): Promise<SquashAgent | null>
+  /** Open the workspace-keyed registry store for the pipeline. */
+  openStore(workspaceKey: string): RegistryStore
+  /** The vendored compaction shell (runMaintenance inside). */
+  compact(
+    agent: Agent,
+    signal: AbortSignal,
+    request: CompactRegionRequest,
+  ): Promise<CompactionResult>
+  /** Parent-side agent resolution (vendored ensureSession kernel). */
+  resolveParentAgent(sessionId: string): Promise<SquashAgent>
+  /** Durability checkpoint for one agent's session (`ctx.sessions.flush`). */
+  flush(agent: Agent): Promise<unknown>
+}
+
 /**
  * Capabilities the RPC handler needs. Production wires live ctx reads in
  * index.ts (live-first cwd resolution, domain-store-backed registry loads,
@@ -175,6 +230,8 @@ export interface BranchRpcPorts {
     readonly sourceSessionId: string
     readonly atSeq?: number
   }): Promise<ForkValue>
+  /** Squash execution capabilities (the `squash` endpoint, issue #8). */
+  readonly squash: SquashPorts
 }
 
 /**
@@ -194,6 +251,20 @@ export interface BranchRpcPorts {
  *   BEFORE forking, official agent-path fork, official rename, record
  *   write) and returns `{ sessionId }` of the created child. Serves the
  *   hijacked official fork button.
+ * - `turnEvents` — payload `{ sessionId, turn }` (issue #8 row expansion);
+ *   locates the turn through {@link extractTurns} and returns
+ *   `{ events: [{ seq, type, text }] }` — every event of the turn's
+ *   `startSeq..endSeq` span (tool calls included), each with a one-line
+ *   summary text ({@link summarizeTurnEvents}). Unknown session, unknown
+ *   turn, or a synthetic (row-less) turn folds into a readable error.
+ * - `squash` — payload `{ sessionId, target }` (issue #8 right-click
+ *   squash): resolves the child agent (live first, cold sessions resume —
+ *   never create), then runs the exact `/squash` command pipeline
+ *   ({@link executeSquash}) against the named target branch. This stage
+ *   keeps the command's lineage constraint: the target must be the branch
+ *   owning the child's parent session. Returns `{ message }` on success;
+ *   every failure (busy child/parent, non-parent target, unknown branch)
+ *   carries the pipeline's user-facing wording.
  *
  * Anything else — unknown endpoints, malformed payloads, missing sessions,
  * thrown port failures — folds into `{ ok: false, error: { code: 'internal',
@@ -201,7 +272,45 @@ export interface BranchRpcPorts {
  * a thrown error into an opaque HTTP 500 instead of a business result.
  */
 export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
-  return async (endpoint, payload) => {
+  return async (endpoint, payload, signal) => {
+    if (endpoint === 'squash') {
+      // The right-click squash action (issue #8): the exact `/squash`
+      // command pipeline, entered through the RPC face. The child agent
+      // resolves live-first (cold sessions resume — never create, and the
+      // resumed agent is flushed after the write but never destroyed, per
+      // the 2026-08-21 squash 定案); every pipeline failure carries its
+      // command-shaped, user-facing wording into the dialog's error row.
+      try {
+        const parsed = squashPayloadSchema.safeParse(payload)
+        if (!parsed.success) {
+          const issues = parsed.error.issues
+            .map(issue => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+            .join('; ')
+          return internalError(`invalid "squash" payload: ${issues}`)
+        }
+        const workspaceKey = await ports.resolveWorkspaceKey(parsed.data.sessionId)
+        if (workspaceKey === null) {
+          return internalError(`no session named ${JSON.stringify(parsed.data.sessionId)} exists`)
+        }
+        const childAgent = await ports.squash.resolveChildAgent(parsed.data.sessionId)
+        if (childAgent === null) {
+          return internalError(`no session named ${JSON.stringify(parsed.data.sessionId)} exists`)
+        }
+        const result = await executeSquash(parsed.data.target, {
+          childAgent,
+          signal,
+          store: ports.squash.openStore(workspaceKey),
+          compact: ports.squash.compact,
+          resolveParentAgent: ports.squash.resolveParentAgent,
+          flush: ports.squash.flush,
+        })
+        return result.kind === 'success'
+          ? { ok: true, value: { message: result.text ?? '' } satisfies SquashValue }
+          : internalError(result.text)
+      } catch (error) {
+        return internalError(error)
+      }
+    }
     if (endpoint === 'fork') {
       // The write endpoint: the hijacked fork button's single round trip.
       // Everything that can reject a bad request (payload shape, name
@@ -224,6 +333,43 @@ export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
         return { ok: true, value }
       } catch (error) {
         return internalError(branchErrorMessage(error))
+      }
+    }
+    if (endpoint === 'turnEvents') {
+      // Row expansion (issue #8): the full event list of one turn — the
+      // graph's own rows are human-prompt turns only, so a turn that has
+      // no row (synthetic injections) is as absent as an unknown session.
+      try {
+        const parsed = turnEventsPayloadSchema.safeParse(payload)
+        if (!parsed.success) {
+          const issues = parsed.error.issues
+            .map(issue => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+            .join('; ')
+          return internalError(`invalid "turnEvents" payload: ${issues}`)
+        }
+        const log = await ports.readSession(parsed.data.sessionId)
+        if (log === null) {
+          return internalError(`no session named ${JSON.stringify(parsed.data.sessionId)} exists`)
+        }
+        const slice = extractTurns(log.events)
+          .find(turn => turn.turn === parsed.data.turn)
+        if (slice === undefined) {
+          return internalError(
+            `session ${JSON.stringify(parsed.data.sessionId)} has no turn ${parsed.data.turn} on the branch graph`,
+          )
+        }
+        // extractTurns only returns closed turns; guard for future shapes.
+        if (slice.endSeq === null) {
+          return internalError(
+            `turn ${parsed.data.turn} of session ${JSON.stringify(parsed.data.sessionId)} is still open`,
+          )
+        }
+        const value: TurnEventsValue = {
+          events: summarizeTurnEvents(log.events, slice.startSeq, slice.endSeq),
+        }
+        return { ok: true, value }
+      } catch (error) {
+        return internalError(error)
       }
     }
     if (endpoint !== 'registry' && endpoint !== 'graph') {

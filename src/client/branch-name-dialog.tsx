@@ -1,11 +1,18 @@
 /**
- * The fork-name dialog: a full-viewport Modal the intercepted fork flow
- * opens to collect the mandatory branch name (issue #3).
- * @module dsh-session-fork/src/client/fork-name-dialog
+ * The branch-name dialog: a full-viewport Modal the fork flows open to
+ * collect the mandatory branch name (issue #3), generalized in issue #8
+ * from the fork-only dialog into the shared name-collection surface for
+ * every branch-naming action (fork, squash-into-branch).
+ * @module dsh-session-fork/src/client/branch-name-dialog
  *
  * Split in two halves:
  * - a framework-free controller (the open/busy/error/draft state machine
- *   plus the `requestName` promise bridge) — unit-testable without React;
+ *   plus the `requestName` promise bridge) — unit-testable without React.
+ *   Issue #8 adds one additive field: the per-request display texts, so
+ *   fork and squash render their own title/description/placeholder/
+ *   confirm copy through the same state machine (zero semantic change —
+ *   a request without texts keeps the fork copy, exactly the issue-#3
+ *   behavior the fork interception relies on);
  * - a thin React component rendering the official Modal + Button atoms,
  *   driven by the controller through useSyncExternalStore.
  *
@@ -18,46 +25,65 @@
 import { useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import css from './ForkNameDialog.module.css'
+import css from './BranchNameDialog.module.css'
 
 /** Result of one submission attempt: accepted (child id) or rejected (message). */
-export type ForkSubmitOutcome =
+export type BranchSubmitOutcome =
   | { readonly ok: true; readonly sessionId: string }
   | { readonly ok: false; readonly message: string }
 
+/**
+ * Per-request display texts (already localized by the caller). Absent on
+ * a request, the dialog renders the fork copy — the issue-#3 behavior.
+ */
+export interface BranchDialogTexts {
+  readonly title: string
+  readonly description: string
+  readonly placeholder: string
+  readonly confirm: string
+}
+
 /** Controller-facing dialog snapshot (immutable; replaced on every change). */
-export interface ForkDialogState {
+export interface BranchDialogState {
   readonly phase: 'closed' | 'open'
   readonly busy: boolean
   readonly error: string | null
   readonly draft: string
+  /** Texts of the open request; null keeps the fork copy (issue #3 flow). */
+  readonly texts: BranchDialogTexts | null
 }
 
-/** Translator: locale keys owned by this plugin (see locales.ts). */
-export type ForkTranslate = (key: ForkDialogLocaleKey) => string
+/**
+ * Translator for the dialog's fallback copy (the issue-#3 fork keys) and
+ * fixed chrome; per-request copy arrives through {@link BranchDialogTexts}.
+ */
+export type BranchDialogTranslate = (key: BranchDialogFallbackKey) => string
 
-/** The locale keys the dialog component reads. */
-export type ForkDialogLocaleKey =
+/** Locale keys the dialog component reads when a request supplies no texts. */
+export type BranchDialogFallbackKey =
   | 'fork.title'
   | 'fork.description'
   | 'fork.placeholder'
-  | 'fork.cancel'
   | 'fork.confirm'
+  | 'fork.cancel'
   | 'fork.close'
 
 /** Framework-free state machine + promise bridge behind the dialog. */
-export interface ForkNameDialogController {
+export interface BranchNameDialogController {
   /** Subscribe to snapshot changes (useSyncExternalStore contract). */
   subscribe(listener: () => void): () => void
   /** Current immutable snapshot. */
-  getSnapshot(): ForkDialogState
+  getSnapshot(): BranchDialogState
   /**
    * Open the dialog and wait for a name. Each confirm runs `submit`; an
    * accepted submission resolves the promise with the child session id,
    * a rejected one shows the message and keeps the dialog open. Cancel
    * (or a second concurrent request) resolves `undefined`.
    */
-  requestName(submit: (name: string) => Promise<ForkSubmitOutcome>): Promise<{ sessionId: string } | undefined>
+  requestName(
+    submit: (name: string) => Promise<BranchSubmitOutcome>,
+    texts?: BranchDialogTexts,
+  ): Promise<{ sessionId: string } | undefined>
   /** Draft text changed (component input). */
   changeDraft(draft: string): void
   /** Confirm pressed: run the pending submission (no-op while busy/closed). */
@@ -67,15 +93,15 @@ export interface ForkNameDialogController {
 }
 
 /** Build one controller. One dialog at a time; a second request settles `undefined`. */
-export function createForkNameDialog(): ForkNameDialogController {
+export function createBranchNameDialog(): BranchNameDialogController {
   const listeners = new Set<() => void>()
-  let state: ForkDialogState = { phase: 'closed', busy: false, error: null, draft: '' }
+  let state: BranchDialogState = { phase: 'closed', busy: false, error: null, draft: '', texts: null }
   let pending: {
-    readonly submit: (name: string) => Promise<ForkSubmitOutcome>
+    readonly submit: (name: string) => Promise<BranchSubmitOutcome>
     readonly settle: (value: { sessionId: string } | undefined) => void
   } | null = null
 
-  const setState = (next: ForkDialogState): void => {
+  const setState = (next: BranchDialogState): void => {
     state = next
     for (const listener of listeners) listener()
   }
@@ -83,7 +109,7 @@ export function createForkNameDialog(): ForkNameDialogController {
   const close = (value: { sessionId: string } | undefined): void => {
     const request = pending
     pending = null
-    setState({ phase: 'closed', busy: false, error: null, draft: '' })
+    setState({ phase: 'closed', busy: false, error: null, draft: '', texts: null })
     request?.settle(value)
   }
 
@@ -93,11 +119,17 @@ export function createForkNameDialog(): ForkNameDialogController {
       return () => { listeners.delete(listener) }
     },
     getSnapshot: () => state,
-    requestName(submit) {
+    requestName(submit, texts) {
       if (pending !== undefined && pending !== null) return Promise.resolve(undefined)
       return new Promise(resolve => {
         pending = { submit, settle: resolve }
-        setState({ phase: 'open', busy: false, error: null, draft: '' })
+        setState({
+          phase: 'open',
+          busy: false,
+          error: null,
+          draft: '',
+          texts: texts === undefined ? null : texts,
+        })
       })
     },
     changeDraft(draft) {
@@ -135,24 +167,25 @@ export function createForkNameDialog(): ForkNameDialogController {
 
 /**
  * The dialog component. Registered once into the `shell.overlay` slot by
- * the plugin apply; renders nothing unless a request is open. All copy
- * arrives localized through `t`; all chrome is the official Modal/Button.
+ * the plugin apply; renders nothing unless a request is open. Copy: the
+ * per-request {@link BranchDialogTexts} when the request supplied them,
+ * otherwise the fork copy through `t`; chrome is the official Modal/Button.
  * @param props.controller - the shared controller instance.
- * @param props.t - bound locale translator.
+ * @param props.t - bound locale translator (fixed chrome keys).
  * @returns the Modal tree (null when closed).
  */
-export function ForkNameDialog({ controller, t }: {
-  controller: ForkNameDialogController
-  t: ForkTranslate
+export function BranchNameDialog({ controller, t }: {
+  controller: BranchNameDialogController
+  t: BranchDialogTranslate
 }): ReactNode {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
   return (
     <Modal
       open={state.phase === 'open'}
       onClose={controller.cancel}
-      title={t('fork.title')}
+      title={state.texts?.title ?? t('fork.title')}
       closeLabel={t('fork.close')}
-      description={t('fork.description')}
+      description={state.texts?.description ?? t('fork.description')}
       footer={(
         <>
           <Button variant="outline" disabled={state.busy} onClick={controller.cancel}>
@@ -163,7 +196,7 @@ export function ForkNameDialog({ controller, t }: {
             disabled={state.busy || state.draft.length === 0}
             onClick={controller.confirm}
           >
-            {t('fork.confirm')}
+            {state.texts?.confirm ?? t('fork.confirm')}
           </Button>
         </>
       )}
@@ -173,8 +206,8 @@ export function ForkNameDialog({ controller, t }: {
         value={state.draft}
         autoFocus
         disabled={state.busy}
-        placeholder={t('fork.placeholder')}
-        aria-label={t('fork.title')}
+        placeholder={state.texts?.placeholder ?? t('fork.placeholder')}
+        aria-label={state.texts?.title ?? t('fork.title')}
         onChange={(e) => { controller.changeDraft(e.target.value) }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !state.busy && state.draft.length > 0) controller.confirm()

@@ -11,13 +11,19 @@
  * @module dsh-session-fork/tests/branch-view.test
  */
 
-import { beforeAll, afterAll, describe, expect, test } from 'bun:test'
+import { beforeAll, afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Window } from 'happy-dom'
 import { BranchGraphView } from '../src/client/BranchGraphView.tsx'
-import { rowLaneColor, type GraphPayloadDto, type GraphRpcResult } from '../src/client/graph-model.ts'
+import {
+  rowLaneColor,
+  type GraphPayloadDto,
+  type GraphRpcResult,
+  type RegistryBranchDto,
+  type TurnEventsPayloadDto,
+} from '../src/client/graph-model.ts'
 import { toISCMHistoryItemViewModelArray } from '../src/client/vendor/vscode/scm-history.ts'
 import type { ISCMHistoryItemViewModel } from '../src/client/vendor/vscode/types.ts'
 
@@ -49,17 +55,38 @@ interface Mounted {
   readonly container: HTMLElement
 }
 
-const NO_DANGLING: Promise<GraphRpcResult<readonly string[]>> =
+const NO_BRANCHES: Promise<GraphRpcResult<readonly RegistryBranchDto[]>> =
   Promise.resolve({ ok: true, value: [] })
+
+const NO_EVENTS: Promise<GraphRpcResult<TurnEventsPayloadDto>> =
+  Promise.resolve({ ok: true, value: { events: [] } })
+
+const NO_FORK: Promise<GraphRpcResult<{ readonly sessionId: string }>> = Promise.resolve({
+  ok: false,
+  error: { code: 'internal', message: 'unused' },
+})
+
+const NO_SQUASH: Promise<GraphRpcResult<{ readonly message: string }>> = Promise.resolve({
+  ok: false,
+  error: { code: 'internal', message: 'unused' },
+})
+
+const SILENT_DIALOG: ViewProps['requestBranchName'] = () => Promise.resolve(undefined)
 
 function mount(
   loadGraph: ViewProps['loadGraph'],
-  loadDangling: ViewProps['loadDangling'] = () => NO_DANGLING,
+  loadBranches: ViewProps['loadBranches'] = () => NO_BRANCHES,
+  loadTurnEvents: ViewProps['loadTurnEvents'] = () => NO_EVENTS,
+  createBranch: ViewProps['createBranch'] = () => NO_FORK,
+  requestBranchName: ViewProps['requestBranchName'] = SILENT_DIALOG,
+  squashBranch: ViewProps['squashBranch'] = () => NO_SQUASH,
 ): Mounted {
   const container = window.document.createElement('div')
   window.document.body.appendChild(container)
   const root = createRoot(container)
-  const props = { sessionId: 's-view', loadGraph, loadDangling, t } as unknown as ViewProps
+  const props = {
+    sessionId: 's-view', loadGraph, loadBranches, loadTurnEvents, createBranch, requestBranchName, squashBranch, t,
+  } as unknown as ViewProps
   act(() => { root.render(<BranchGraphView {...props} />) })
   return { root, container }
 }
@@ -122,9 +149,12 @@ describe('BranchGraphView states', () => {
     expect(badges).toHaveLength(1)
     // The badge carries the branch icon (official IconBranchOutline16).
     expect(badges[0]?.querySelector('svg')).not.toBeNull()
-    // The label carries the full text for the CSS tooltip.
-    const label = mounted.container.querySelector('[data-full="second turn"]')
-    expect(label).not.toBeNull()
+    // The label spans render as the official Tooltip primitive's anchors
+    // (issue #8): no data-full CSS-tooltip residue anywhere.
+    const label = [...mounted.container.querySelectorAll('span')]
+      .find(span => span.textContent === 'second turn')
+    expect(label).toBeDefined()
+    expect(mounted.container.querySelector('[data-full]')).toBeNull()
     await act(async () => { mounted.root.unmount() })
   })
 
@@ -138,7 +168,13 @@ describe('BranchGraphView states', () => {
   test('dangling branches render as a distinct demoted section', async () => {
     const mounted = mount(
       () => Promise.resolve(resultOf({ nodes: [], head: null })),
-      () => Promise.resolve({ ok: true, value: ['ghost', 'wip'] }),
+      () => Promise.resolve({
+        ok: true,
+        value: [
+          { name: 'ghost', sessionId: 's-1', dangling: true },
+          { name: 'wip', sessionId: 's-2', dangling: true },
+        ] as readonly RegistryBranchDto[],
+      }),
     )
     await flush()
     expect(mounted.container.textContent).toContain('#state.dangling')
@@ -157,6 +193,235 @@ describe('BranchGraphView states', () => {
     await flush()
     expect(mounted.container.querySelectorAll('svg.graph')).toHaveLength(3)
     expect(mounted.container.textContent).not.toContain('#state.dangling')
+    await act(async () => { mounted.root.unmount() })
+  })
+})
+
+describe('row expansion (issue #8)', () => {
+  /** Payload whose rows carry the issue-#8 data-plane metadata. */
+  const EXPANDABLE_GRAPH: GraphPayloadDto = {
+    nodes: [
+      {
+        id: 's-a:2', parentIds: ['s-a:1'], subject: 'asked for a listing',
+        sessionId: 's-a', turn: 2, endSeq: 9,
+      },
+      { id: 's-a:1', parentIds: [], subject: 'root turn', sessionId: 's-a', turn: 1, endSeq: 3 },
+    ],
+    head: 's-a:2',
+  }
+  const EVENTS: TurnEventsPayloadDto = {
+    events: [
+      { seq: 4, type: 'turn/start', text: 'turn/start' },
+      { seq: 5, type: 'user/message', text: 'list the files' },
+      { seq: 6, type: 'tool/call', text: 'tool bash: {"command":"ls"}' },
+      { seq: 9, type: 'turn/end', text: 'turn/end' },
+    ],
+  }
+
+  /** The expandable row element (meta-carrying rows are role=button). */
+  function expandableRow(mounted: Mounted, id: string): HTMLElement {
+    const rows = [...mounted.container.querySelectorAll('[role="button"]')]
+    const row = rows.find(element => element.textContent?.includes(
+      EXPANDABLE_GRAPH.nodes.find(node => node.id === id)!.subject))
+    if (row === undefined) throw new Error(`row ${id} not found`)
+    return row as HTMLElement
+  }
+
+  test('clicking a row loads its turn events and renders lightweight lines', async () => {
+    const calls: Array<{ sessionId: string, turn: number }> = []
+    const mounted = mount(
+      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
+      () => NO_BRANCHES,
+      (sessionId, turn) => {
+        calls.push({ sessionId, turn })
+        return Promise.resolve({ ok: true, value: EVENTS })
+      },
+    )
+    await flush()
+    await act(async () => { expandableRow(mounted, 's-a:2').click() })
+    await flush()
+    expect(calls).toEqual([{ sessionId: 's-a', turn: 2 }])
+    for (const text of ['list the files', 'tool bash: {"command":"ls"}']) {
+      expect(mounted.container.textContent).toContain(text)
+    }
+    // Type badges ride along, one per event line.
+    const badges = [...mounted.container.querySelectorAll('[data-event-type]')]
+    expect(badges.map(badge => badge.textContent)).toEqual([
+      'turn/start', 'user/message', 'tool/call', 'turn/end',
+    ])
+    // Full summary text rides the official Tooltip primitive (no title
+    // attribute fallback anymore, issue #8).
+    const toolLine = [...mounted.container.querySelectorAll('span')]
+      .find(span => span.textContent === 'tool bash: {"command":"ls"}')
+    expect(toolLine).toBeDefined()
+    expect(mounted.container.querySelector('[title]')).toBeNull()
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('a second click collapses; the cached events survive without a re-fetch', async () => {
+    let calls = 0
+    const mounted = mount(
+      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
+      () => NO_BRANCHES,
+      () => {
+        calls += 1
+        return Promise.resolve({ ok: true, value: EVENTS })
+      },
+    )
+    await flush()
+    const row = expandableRow(mounted, 's-a:2')
+    await act(async () => { row.click() })
+    await flush()
+    expect(calls).toBe(1)
+    await act(async () => { row.click() })
+    await flush()
+    expect(calls).toBe(1)
+    expect(mounted.container.textContent).not.toContain('list the files')
+    // Re-expanding is instant and reuses the cache (still one fetch).
+    await act(async () => { row.click() })
+    await flush()
+    expect(calls).toBe(1)
+    expect(mounted.container.textContent).toContain('list the files')
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('a failing event fetch renders the error line inside the expansion', async () => {
+    const mounted = mount(
+      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
+      () => NO_BRANCHES,
+      () => Promise.resolve({ ok: false, error: { code: 'internal', message: 'no turn 2' } }),
+    )
+    await flush()
+    await act(async () => { expandableRow(mounted, 's-a:2').click() })
+    await flush()
+    expect(mounted.container.textContent).toContain('#events.error')
+    expect(mounted.container.textContent).toContain('no turn 2')
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('rows without issue-#8 metadata stay plain (not expandable)', async () => {
+    const mounted = mount(() => Promise.resolve(resultOf(TWO_BRANCH_GRAPH)))
+    await flush()
+    expect(mounted.container.querySelectorAll('[role="button"]')).toHaveLength(0)
+    expect(mounted.container.querySelectorAll('[aria-expanded]')).toHaveLength(0)
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('the expansion subtree is indented to the label column (CSS contract)', () => {
+    const source = readFileSync(
+      new URL('../src/client/BranchGraphView.module.css', import.meta.url), 'utf8')
+    expect(source).toContain('.events')
+    expect(source).toContain('text-overflow: ellipsis')
+    expect(source).toContain('.eventType')
+  })
+})
+
+describe('row context menu + fork from here (issue #8)', () => {
+  const EXPANDABLE_GRAPH2: GraphPayloadDto = {
+    nodes: [
+      {
+        id: 's-a:2', parentIds: ['s-a:1'], subject: 'asked for a listing',
+        sessionId: 's-a', turn: 2, endSeq: 9,
+      },
+      { id: 's-a:1', parentIds: [], subject: 'root turn', sessionId: 's-a', turn: 1, endSeq: 3 },
+    ],
+    head: 's-a:2',
+  }
+
+  /** Fire a right-click on the row showing `subject`. */
+  function contextMenuOn(mounted: Mounted, subject: string): void {
+    const row = [...mounted.container.querySelectorAll('[role="button"]')]
+      .find(element => element.textContent?.includes(subject))
+    if (row === undefined) throw new Error(`row with "${subject}" not found`)
+    act(() => {
+      row.dispatchEvent(new window.MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: 40, clientY: 60,
+      }))
+    })
+  }
+
+  test('right-click opens the menu at the pointer; squash stays disabled without lineage', async () => {
+    const mounted = mount(() => Promise.resolve(resultOf(EXPANDABLE_GRAPH2)))
+    await flush()
+    expect(mounted.container.querySelector('[role="menu"]')).toBeNull()
+    contextMenuOn(mounted, 'asked for a listing')
+    const menu = mounted.container.querySelector('[role="menu"]') ?? window.document.querySelector('[role="menu"]')
+    expect(menu).not.toBeNull()
+    const items = [...(menu as HTMLElement).querySelectorAll('[role="menuitem"]')]
+    expect(items.map(item => item.textContent)).toEqual(['#menu.fork', '#menu.squash'])
+    expect((items[1] as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('Fork from here: dialog texts, client gate, fork at endSeq, refresh + toast', async () => {
+    let graphCalls = 0
+    const forkCalls: Array<{ name: string, sessionId: string, atSeq?: number }> = []
+    const dialogTextsSeen: unknown[] = []
+    const requestBranchName: ViewProps['requestBranchName'] = async (submit, texts) => {
+      dialogTextsSeen.push(texts)
+      const first = await submit(' spaced ')
+      if (first.ok) return { sessionId: first.sessionId }
+      const second = await submit('experiment')
+      return second.ok ? { sessionId: second.sessionId } : undefined
+    }
+    const mounted = mount(
+      () => {
+        graphCalls += 1
+        return Promise.resolve(resultOf(EXPANDABLE_GRAPH2))
+      },
+      () => NO_BRANCHES,
+      () => NO_EVENTS,
+      async (request) => {
+        if (request.name !== 'experiment') {
+          return { ok: false, error: { code: 'internal', message: 'unreachable' } }
+        }
+        forkCalls.push(request)
+        return { ok: true, value: { sessionId: 's-child-new' } }
+      },
+      requestBranchName,
+    )
+    await flush()
+    contextMenuOn(mounted, 'asked for a listing')
+    const item = [...window.document.querySelectorAll('[role="menuitem"]')]
+      .find(element => element.textContent === '#menu.fork')
+    await act(async () => { item?.click() })
+    await flush()
+    await flush()
+    expect(forkCalls).toEqual([{ name: 'experiment', sessionId: 's-a', atSeq: 9 }])
+    // Success refreshed the graph (initial load + post-fork reload).
+    expect(graphCalls).toBe(2)
+    // The toast announces the created branch (body portal — fixed banner).
+    expect(window.document.body.textContent).toContain('#toast.forkedexperiment')
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('dialog rejection (invalid name) surfaces through the dialog bridge, no fork, no toast', async () => {
+    const submissions: string[] = []
+    const requestBranchName: ViewProps['requestBranchName'] = async (submit) => {
+      const outcome = await submit(' spaced ')
+      submissions.push(outcome.ok ? 'ok' : 'rejected')
+      return undefined
+    }
+    let forkCalls = 0
+    const mounted = mount(
+      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH2)),
+      () => NO_BRANCHES,
+      () => NO_EVENTS,
+      async () => {
+        forkCalls += 1
+        return { ok: true, value: { sessionId: 'x' } }
+      },
+      requestBranchName,
+    )
+    await flush()
+    contextMenuOn(mounted, 'asked for a listing')
+    const item = [...window.document.querySelectorAll('[role="menuitem"]')]
+      .find(element => element.textContent === '#menu.fork')
+    await act(async () => { item?.click() })
+    await flush()
+    expect(submissions).toEqual(['rejected'])
+    expect(forkCalls).toBe(0)
+    expect(window.document.body.textContent).not.toContain('#toast.forked')
     await act(async () => { mounted.root.unmount() })
   })
 })
@@ -213,10 +478,11 @@ describe('BranchGraphView CSS contract (source text)', () => {
     expect(css.match(/--dsh-fork-graph-3: #d9944d/)).not.toBeNull()
   })
 
-  test('the label ellipsizes and the tooltip fades in', () => {
+  test('the label ellipsizes; full text went to the official Tooltip primitive', () => {
     expect(css).toContain('text-overflow: ellipsis')
-    expect(css).toContain('content: attr(data-full)')
-    expect(css).toMatch(/transition: opacity/)
+    // The CSS attr() bubble is gone (issue #8 replaced it with Tooltip).
+    expect(css).not.toContain('content: attr(data-full)')
+    expect(css).not.toContain('.label::after')
   })
 
   test('rows hover, the HEAD row is the current treatment, and badges are solid vscode chips', () => {
@@ -244,5 +510,139 @@ describe('BranchGraphView CSS contract (source text)', () => {
     expect(css).toContain('.danglingRef')
     expect(css).toContain('1px dashed')
     expect(css).toContain('opacity: 0.7')
+  })
+})
+
+describe('squash into branch (issue #8)', () => {
+  // Portal-level assertions need a clean body: earlier tests' containers
+  // (and any toast they left mid-fade) stay in this shared happy-dom body.
+  beforeEach(() => {
+    window.document.body.replaceChildren()
+  })
+
+  /** Root rows (s-a) and forked-child rows (s-b) in one graph. */
+  const LINEAGE_GRAPH: GraphPayloadDto = {
+    nodes: [
+      {
+        id: 's-b:1', parentIds: ['s-a:2'], subject: 'experiment turn',
+        sessionId: 's-b', turn: 1, endSeq: 12,
+      },
+      { id: 's-a:2', parentIds: ['s-a:1'], subject: 'root second', sessionId: 's-a', turn: 2, endSeq: 9 },
+      { id: 's-a:1', parentIds: [], subject: 'root first', sessionId: 's-a', turn: 1, endSeq: 3 },
+    ],
+    head: 's-b:1',
+  }
+
+  const LINEAGE_BRANCHES: readonly RegistryBranchDto[] = [
+    { name: 'main', sessionId: 's-a', dangling: false, forkOrigin: null },
+    { name: 'exp', sessionId: 's-b', dangling: false, forkOrigin: { parentSessionId: 's-a', atSeq: 9 } },
+  ]
+
+  const LINEAGE_LOAD: ViewProps['loadBranches'] = () =>
+    Promise.resolve({ ok: true, value: LINEAGE_BRANCHES })
+
+  function contextMenuOn(mounted: Mounted, subject: string): void {
+    const row = [...mounted.container.querySelectorAll('[role="button"]')]
+      .find(element => element.textContent?.includes(subject))
+    if (row === undefined) throw new Error(`row with "${subject}" not found`)
+    act(() => {
+      row.dispatchEvent(new window.MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: 10, clientY: 20,
+      }))
+    })
+  }
+
+  function menuItems(): HTMLButtonElement[] {
+    return [...window.document.querySelectorAll('[role="menuitem"]')] as HTMLButtonElement[]
+  }
+
+  test('squash is enabled on forked-session rows and disabled on root rows', async () => {
+    const mounted = mount(
+      () => Promise.resolve(resultOf(LINEAGE_GRAPH)),
+      LINEAGE_LOAD,
+    )
+    await flush()
+    contextMenuOn(mounted, 'experiment turn')
+    const squashChild = menuItems()[1]
+    expect(squashChild?.disabled).toBe(false)
+    await act(async () => { mounted.root.unmount() })
+
+    const mountedRoot = mount(
+      () => Promise.resolve(resultOf(LINEAGE_GRAPH)),
+      LINEAGE_LOAD,
+    )
+    await flush()
+    contextMenuOn(mountedRoot, 'root second')
+    const squashRoot = menuItems()[1]
+    expect(squashRoot?.disabled).toBe(true)
+    await act(async () => { mountedRoot.root.unmount() })
+  })
+
+  test('squash flow: dialog texts name the parent, target goes to the wire, refresh + toast', async () => {
+    let graphCalls = 0
+    const squashCalls: Array<{ sessionId: string, target: string }> = []
+    const textsSeen: unknown[] = []
+    const requestBranchName: ViewProps['requestBranchName'] = async (submit, texts) => {
+      textsSeen.push(texts)
+      const outcome = await submit('main')
+      return outcome.ok ? { sessionId: outcome.sessionId } : undefined
+    }
+    const mounted = mount(
+      () => {
+        graphCalls += 1
+        return Promise.resolve(resultOf(LINEAGE_GRAPH))
+      },
+      LINEAGE_LOAD,
+      () => NO_EVENTS,
+      () => NO_FORK,
+      requestBranchName,
+      async (request) => {
+        squashCalls.push({ sessionId: request.sessionId, target: request.target })
+        return { ok: true, value: { message: 'Squashed 2 surface nodes into branch \'main\'.' } }
+      },
+    )
+    await flush()
+    contextMenuOn(mounted, 'experiment turn')
+    await act(async () => { menuItems()[1]?.click() })
+    await flush()
+    await flush()
+    expect(squashCalls).toEqual([{ sessionId: 's-b', target: 'main' }])
+    expect(textsSeen[0]).toMatchObject({
+      title: '#squash.title',
+      placeholder: '#squash.placeholdermain',
+      confirm: '#squash.confirm',
+    })
+    expect(graphCalls).toBe(2)
+    expect(window.document.body.textContent).toContain('#toast.squashedmain')
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('a host rejection surfaces through the dialog bridge: no toast, no refresh', async () => {
+    let graphCalls = 0
+    const requestBranchName: ViewProps['requestBranchName'] = async (submit) => {
+      const outcome = await submit('other')
+      return outcome.ok ? { sessionId: outcome.sessionId } : undefined
+    }
+    const mounted = mount(
+      () => {
+        graphCalls += 1
+        return Promise.resolve(resultOf(LINEAGE_GRAPH))
+      },
+      LINEAGE_LOAD,
+      () => NO_EVENTS,
+      () => NO_FORK,
+      requestBranchName,
+      async () => ({
+        ok: false,
+        error: { code: 'internal', message: "branch 'other' is not this session's parent" },
+      }),
+    )
+    await flush()
+    contextMenuOn(mounted, 'experiment turn')
+    await act(async () => { menuItems()[1]?.click() })
+    await flush()
+    expect(graphCalls).toBe(1)
+    expect(window.document.body.textContent).not.toContain('#toast.squashed')
+    await act(async () => { mounted.root.unmount() })
   })
 })

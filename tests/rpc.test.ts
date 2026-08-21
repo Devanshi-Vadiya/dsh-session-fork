@@ -6,13 +6,22 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compaction'
+import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
+import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   RPC_CHANNEL,
   createBranchRpcHandler,
   registerRpcChannel,
+  type BranchRpcPorts,
+  type ConnectionRpcLike,
+  type RpcHandler,
+  type SquashPorts,
 } from '../src/rpc.ts'
-import type { BranchRpcPorts, ConnectionRpcLike, RpcHandler } from '../src/rpc.ts'
-import type { RegistryState } from '../src/types.ts'
+import type { RegistryState, RegistryStore } from '../src/types.ts'
 
 interface HandleCall {
   readonly channel: string
@@ -54,6 +63,7 @@ interface PortsHarness {
 function portsHarness(options: {
   readonly workspaces: Record<string, RegistryState>
   readonly resolve: (sessionId: string) => string | null
+  readonly squash?: SquashPorts
 }): PortsHarness {
   const resolveCalls: string[] = []
   const loadCalls: string[] = []
@@ -71,6 +81,15 @@ function portsHarness(options: {
       },
       sessionExists(id) {
         return id !== 's-gone'
+      },
+      // Squash port defaults: nothing resolves — the squash describe
+      // injects the full fake pipeline.
+      squash: options.squash ?? {
+        async resolveChildAgent() { return null },
+        openStore() { throw new Error('no store') },
+        async compact() { throw new Error('no compact') },
+        async resolveParentAgent() { throw new Error('no parent') },
+        async flush() { return undefined },
       },
     },
   }
@@ -331,5 +350,235 @@ describe('createBranchRpcHandler: fork endpoint', () => {
       expect(result.ok).toBe(false)
     }
     expect(pipelineCalls).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// squash endpoint (issue #8): the exact /squash pipeline through fake ports.
+
+/** One raw fake log event; its array index becomes its seq. */
+interface FakeEvent {
+  readonly type: string
+  readonly data?: unknown
+}
+
+/** A fake session with header lineage and, optionally, an append recorder. */
+function fakeSession(
+  header: Partial<SessionHeader>,
+  rawEvents: readonly FakeEvent[],
+  surfaceSeqs: readonly number[],
+  appended?: unknown[],
+): Session {
+  const events = rawEvents.map((raw, seq) => ({ seq, ...raw })) as unknown as SessionEvent[]
+  const session = {
+    id: header.id,
+    header,
+    events,
+    surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
+    deriveEventMessage(event: SessionEvent) {
+      if (event.type !== 'user/message') return null
+      const data = event.data as { message?: unknown } | undefined
+      return (data?.message ?? null) as never
+    },
+    ...(appended === undefined ? {} : {
+      append(type: string, data: unknown, opts: unknown) {
+        appended.push({ type, data, opts })
+        return { seq: 99, type, data }
+      },
+    }),
+  }
+  return session as unknown as Session
+}
+
+/** A checkpoint user message like the one a completed compaction lands. */
+function checkpointUserMessage(compactionId: string, text: string): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: compactCheckpointSource(CompactionId(compactionId)),
+  })
+}
+
+/** Minimal fake agent around a session and a phase kind. */
+function fakeAgent(session: Session, phaseKind: string): Agent {
+  return { session, phase: { kind: phaseKind } } as unknown as Agent
+}
+
+const SQUASH_RESULT = {
+  compactionId: CompactionId('compaction-1'),
+  startSeq: 4,
+  summarySeq: 6,
+  endSeq: 8,
+  summary: [],
+  shadowedRange: { start: 2, end: 3 },
+  shadowedSeqs: [2, 3],
+  shadowedTokenCount: 42,
+} as CompactionResult
+
+/** The squash fixture: child seed prefix + two post-fork nodes + checkpoint tail. */
+function squashChildSession(): Session {
+  return fakeSession(
+    { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+    [
+      { type: 'user/message' },
+      { type: 'session/end-seed' },
+      { type: 'user/message' },
+      { type: 'user/message', data: { message: checkpointUserMessage('compaction-1', 'summary body') } },
+    ],
+    [0, 2, 3],
+  )
+}
+
+/** The squash workspace: the child's registry record names the parent branch. */
+const SQUASH_WORKSPACE: RegistryState = {
+  branches: {
+    main: { name: 'main', sessionId: 'session-parent', forkOrigin: null },
+    exp: {
+      name: 'exp', sessionId: 'session-child',
+      forkOrigin: { parentSessionId: 'session-parent', atSeq: 1 },
+    },
+    other: { name: 'other', sessionId: 'session-unrelated', forkOrigin: null },
+  },
+}
+
+/** Full squash ports over fake agents; every knob recordable. */
+function squashPorts(options: {
+  readonly childPhase?: string
+  readonly childSession?: Session
+  readonly childMissing?: boolean
+  readonly compactResult?: CompactionResult
+  readonly compactError?: Error
+} = {}): SquashPorts & {
+  readonly appended: unknown[]
+  readonly flushes: string[]
+  readonly compactCalls: number
+} {
+  const appended: unknown[] = []
+  const flushes: string[] = []
+  let compactCalls = 0
+  const child = fakeAgent(options.childSession ?? squashChildSession(), options.childPhase ?? 'idle')
+  const parent = fakeAgent(
+    fakeSession({ id: 'session-parent' }, [], [], appended),
+    'idle',
+  )
+  const store: RegistryStore = {
+    load: async () => SQUASH_WORKSPACE,
+    save: async () => {},
+  }
+  return {
+    appended,
+    flushes,
+    get compactCalls() { return compactCalls },
+    async resolveChildAgent() {
+      return options.childMissing === true ? null : child
+    },
+    openStore: () => store,
+    async compact(agent, signal, request) {
+      compactCalls += 1
+      if (options.compactError !== undefined) throw options.compactError
+      return options.compactResult ?? SQUASH_RESULT
+    },
+    async resolveParentAgent() { return parent },
+    async flush(agent) {
+      flushes.push((agent.session as Session).id ?? 'unknown')
+    },
+  }
+}
+
+describe('createBranchRpcHandler squash endpoint', () => {
+  test('success: full pipeline, parent append + flush, command-shaped message', async () => {
+    const ports = squashPorts()
+    const { ports: harness } = portsHarness({
+      workspaces: { '/work': SQUASH_WORKSPACE },
+      resolve: (id) => (id === 'session-child' ? '/work' : null),
+      squash: ports,
+    })
+    const handler = createBranchRpcHandler(harness as BranchRpcPorts)
+    const outcome = await handler('squash', { sessionId: 'session-child', target: 'main' })
+    expect(outcome).toEqual({
+      ok: true,
+      value: { message: expect.stringContaining("into branch 'main'") },
+    })
+    expect(ports.compactCalls).toBe(1)
+    // The merge checkpoint landed in the parent, and the write was flushed.
+    expect(ports.appended).toHaveLength(1)
+    expect(ports.flushes).toContain('session-parent')
+  })
+
+  test('a target that is not the parent branch is a readable error', async () => {
+    const ports = squashPorts()
+    const { ports: harness } = portsHarness({
+      workspaces: { '/work': SQUASH_WORKSPACE },
+      resolve: () => '/work',
+      squash: ports,
+    })
+    const handler = createBranchRpcHandler(harness as BranchRpcPorts)
+    const outcome = await handler('squash', { sessionId: 'session-child', target: 'other' })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.error.message).toContain("is not this session's parent")
+    expect(ports.compactCalls).toBe(0)
+  })
+
+  test('a busy child folds into the pipeline busy wording', async () => {
+    const ports = squashPorts({ childPhase: 'running' })
+    const { ports: harness } = portsHarness({
+      workspaces: { '/work': SQUASH_WORKSPACE },
+      resolve: () => '/work',
+      squash: ports,
+    })
+    const handler = createBranchRpcHandler(harness as BranchRpcPorts)
+    const outcome = await handler('squash', { sessionId: 'session-child', target: 'main' })
+    expect(outcome.ok).toBe(false)
+    expect(ports.compactCalls).toBe(0)
+  })
+
+  test('an unknown branch name is a readable error', async () => {
+    const ports = squashPorts()
+    const { ports: harness } = portsHarness({
+      workspaces: { '/work': SQUASH_WORKSPACE },
+      resolve: () => '/work',
+      squash: ports,
+    })
+    const handler = createBranchRpcHandler(harness as BranchRpcPorts)
+    const outcome = await handler('squash', { sessionId: 'session-child', target: 'nope' })
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        code: 'internal',
+        message: "no branch named 'nope' in this workspace",
+        details: {},
+      },
+    })
+  })
+
+  test('an unresolvable child session is a readable error', async () => {
+    const ports = squashPorts({ childMissing: true })
+    const { ports: harness } = portsHarness({
+      workspaces: { '/work': SQUASH_WORKSPACE },
+      resolve: () => '/work',
+      squash: ports,
+    })
+    const handler = createBranchRpcHandler(harness as BranchRpcPorts)
+    const outcome = await handler('squash', { sessionId: 'session-ghost', target: 'main' })
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'no session named "session-ghost" exists',
+        details: {},
+      },
+    })
+  })
+
+  test('a malformed payload is rejected by the schema', async () => {
+    const { ports: harness } = portsHarness({
+      workspaces: {},
+      resolve: () => null,
+    })
+    const handler = createBranchRpcHandler(harness as BranchRpcPorts)
+    const outcome = await handler('squash', { sessionId: '' })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.error.message).toContain('invalid "squash" payload')
   })
 })

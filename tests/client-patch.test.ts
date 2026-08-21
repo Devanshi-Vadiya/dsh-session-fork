@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { createForkNameDialog } from '../src/client/fork-name-dialog.tsx'
+import { createBranchNameDialog } from '../src/client/branch-name-dialog.tsx'
 import { installForkIntercept } from '../src/client/fork-intercept.js'
 import type {
   ForkEndpointPayload,
@@ -68,7 +68,7 @@ function depsHarness(overrides: Partial<ForkInterceptDeps> = {}): {
 
 describe('fork-name dialog controller', () => {
   test('accept path: submit ok resolves the child id and closes', async () => {
-    const dialog = createForkNameDialog()
+    const dialog = createBranchNameDialog()
     const request = dialog.requestName(async () => ({ ok: true, sessionId: 'child-9' }))
     expect(dialog.getSnapshot().phase).toBe('open')
     dialog.confirm()
@@ -77,7 +77,7 @@ describe('fork-name dialog controller', () => {
   })
 
   test('reject path: a failed submit shows the message and stays open; retry then accept', async () => {
-    const dialog = createForkNameDialog()
+    const dialog = createBranchNameDialog()
     let attempt = 0
     const request = dialog.requestName(async () => {
       attempt += 1
@@ -94,7 +94,7 @@ describe('fork-name dialog controller', () => {
   })
 
   test('cancel settles undefined; a confirm landing mid-flight after cancel is dropped', async () => {
-    const dialog = createForkNameDialog()
+    const dialog = createBranchNameDialog()
     let release!: (outcome: { ok: true; sessionId: string }) => void
     const request = dialog.requestName(() => new Promise(resolve => {
       release = resolve
@@ -107,7 +107,7 @@ describe('fork-name dialog controller', () => {
   })
 
   test('a second concurrent request settles undefined immediately', async () => {
-    const dialog = createForkNameDialog()
+    const dialog = createBranchNameDialog()
     void dialog.requestName(() => new Promise(() => {}))
     await expect(dialog.requestName(() => new Promise(() => {}))).resolves.toBeUndefined()
   })

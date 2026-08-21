@@ -31,6 +31,15 @@ export interface GraphNodeDto {
   readonly parentIds: readonly string[]
   readonly subject: string
   readonly refs?: readonly { readonly id: string; readonly name: string }[] | undefined
+  /** Owning session (mirror of the host's `GraphNode.sessionId`). */
+  readonly sessionId?: string | undefined
+  /** Turn handle of the row (mirror of the host's `GraphNode.turn`). */
+  readonly turn?: number | undefined
+  /**
+   * Closing `turn/end` seq in the owning session's log — the `atSeq` the
+   * right-click "fork from here" action sends (host's `GraphNode.endSeq`).
+   */
+  readonly endSeq?: number | undefined
 }
 
 /** Wire shape of the `graph` endpoint value. */
@@ -39,11 +48,25 @@ export interface GraphPayloadDto {
   readonly head: string | null
 }
 
+/** Wire shape of one event row served by the `turnEvents` endpoint. */
+export interface TurnEventRowDto {
+  readonly seq: number
+  readonly type: string
+  readonly text: string
+}
+
+/** Wire shape of the `turnEvents` endpoint value (row expansion). */
+export interface TurnEventsPayloadDto {
+  readonly events: readonly TurnEventRowDto[]
+}
+
 /** Wire shape of one `registry` endpoint branch row, as the view reads it. */
 export interface RegistryBranchDto {
   readonly name: string
   readonly sessionId: string
   readonly dangling: boolean
+  /** Fork lineage (host `BranchSnapshot.forkOrigin`); null on root branches. */
+  readonly forkOrigin?: { readonly parentSessionId: string; readonly atSeq: number } | null
 }
 
 /** Result of the mapping: vscode history items plus the HEAD ref. */

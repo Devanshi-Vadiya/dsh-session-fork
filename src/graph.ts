@@ -232,6 +232,91 @@ export interface GraphNode {
   readonly subject: string
   /** Branch names whose head lands on this node. */
   readonly refs?: readonly GraphNodeRef[]
+  /** Owning session of the turn (row→data-plane address, issue #8). */
+  readonly sessionId?: string
+  /** `data.turn` of the turn the row stands for. */
+  readonly turn?: number
+  /**
+   * Seq of the turn's closing `turn/end` event in the owning session's log
+   * coordinates — exactly the `atSeq` semantic of the fork endpoint
+   * (right-click "fork from here" seeds the child at this boundary).
+   */
+  readonly endSeq?: number
+}
+
+/** One lightweight event row served by the `turnEvents` endpoint. */
+export interface TurnEventSummary {
+  readonly seq: number
+  readonly type: string
+  readonly text: string
+}
+
+/** One-line soft cap for `turnEvents` summaries; longer text is cut and marked. */
+const EVENT_TEXT_LIMIT = 120
+
+/** Cut to the line cap, marking the omission so truncation is visible. */
+function truncateLine(text: string): string {
+  return text.length <= EVENT_TEXT_LIMIT ? text : `${text.slice(0, EVENT_TEXT_LIMIT)}…(truncated)`
+}
+
+/** Join the text blocks of one message-shaped `data.content` array. */
+function contentText(data: unknown, key: 'content' | 'message'): string {
+  if (data === null || typeof data !== 'object') return ''
+  const holder = key === 'content' ? data : (data as { message?: unknown }).message
+  const content = (holder as { content?: unknown } | undefined)?.content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((block): block is { type: 'text'; text: string } =>
+      typeof block === 'object' && block !== null
+      && (block as { type?: unknown }).type === 'text'
+      && typeof (block as { text?: unknown }).text === 'string')
+    .map(block => block.text)
+    .join(' ')
+    .trim()
+}
+
+/**
+ * One event's one-line summary text for row expansion (issue #8):
+ * user/assistant messages show their joined text blocks; a tool call shows
+ * the tool name plus brief raw arguments; every other type renders as the
+ * bare type name. Anything longer than the line cap is cut and marked.
+ */
+export function summarizeEventText(event: GraphEvent): string {
+  const data = event.data
+  switch (event.type) {
+    case 'user/message': {
+      const text = contentText(data, 'content')
+      return truncateLine(text === '' ? 'user/message' : text)
+    }
+    case 'assistant/message': {
+      const text = contentText(data, 'message')
+      return truncateLine(text === '' ? 'assistant/message' : text)
+    }
+    case 'tool/call': {
+      if (data === null || typeof data !== 'object') return 'tool/call'
+      const { name, arguments: args } = data as { name?: unknown; arguments?: unknown }
+      if (typeof name !== 'string') return 'tool/call'
+      const brief = typeof args === 'string' ? args : ''
+      return truncateLine(`tool ${name}: ${brief}`)
+    }
+    default:
+      return event.type
+  }
+}
+
+/**
+ * The lightweight event list of one closed turn span (inclusive
+ * `startSeq..endSeq`, every event kind — tool calls included), for the
+ * `turnEvents` endpoint's row-expansion UI. Pure over the log slice.
+ */
+export function summarizeTurnEvents(
+  events: readonly GraphEvent[],
+  startSeq: number,
+  endSeq: number,
+): TurnEventSummary[] {
+  return events
+    .filter(event => event.seq >= startSeq && event.seq <= endSeq)
+    .map(event => ({ seq: event.seq, type: event.type, text: summarizeEventText(event) }))
 }
 
 /** The registry-facing slice of one branch record. */
@@ -360,7 +445,16 @@ export async function assembleBranchGraph(
       if (previous !== undefined) parentIds.push(sliceId(sessionId, previous))
       if (index === 0 && anchorId !== null) parentIds.push(anchorId)
       const id = sliceId(sessionId, turn)
-      mutableNodes.push({ id, parentIds, subject: turn.subject, refs: [] })
+      mutableNodes.push({
+        id,
+        parentIds,
+        subject: turn.subject,
+        refs: [],
+        sessionId,
+        turn: turn.turn,
+        // extractTurns only emits closed turns, so endSeq is always set.
+        endSeq: turn.endSeq ?? undefined,
+      })
       sortKeys.set(id, { time: turn.startTime ?? 0, sessionIndex, seq: turn.startSeq })
     })
   }
@@ -385,9 +479,15 @@ export async function assembleBranchGraph(
       if (leftKey.sessionIndex !== rightKey.sessionIndex) return rightKey.sessionIndex - leftKey.sessionIndex
       return rightKey.seq - leftKey.seq
     })
-    .map(node => (node.refs.length === 0
-      ? { id: node.id, parentIds: node.parentIds, subject: node.subject }
-      : { id: node.id, parentIds: node.parentIds, subject: node.subject, refs: node.refs }))
+    .map(node => ({
+      id: node.id,
+      parentIds: node.parentIds,
+      subject: node.subject,
+      sessionId: node.sessionId,
+      turn: node.turn,
+      endSeq: node.endSeq,
+      ...(node.refs.length === 0 ? {} : { refs: node.refs }),
+    }))
 
   const headTurns = ownTurns.get(headSessionId) ?? []
   const headLast = headTurns.at(-1)

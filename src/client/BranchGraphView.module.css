@@ -47,6 +47,95 @@ body[data-ds-dark-theme] .graph {
    * SWIMLANE_HEIGHT [fork:adapt] so the lane SVGs stay contiguous). */
   min-height: 38px;
   padding: 0 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* One row plus its expansion subtree (issue #8 row expansion). */
+.rowBlock {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Expand/collapse twistie, sitting between the lane SVG and the label. */
+.twistie {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--dsw-alias-label-primary);
+  opacity: 0.7;
+}
+
+/* Zero-size in-place anchor span for the pointer-positioned context menu
+ * (the portaled Menu positions itself from getAnchorRect, not this span). */
+.menuAnchor {
+  display: none;
+}
+
+/* The turn's event subtree: lightweight text lines indented to the label
+ * column, each with a type badge and an ellipsized summary. */
+.events {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 8px 4px 36px;
+  background: var(--dsw-alias-bg-mask-1);
+  font-size: 12px;
+}
+
+.eventRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 20px;
+  line-height: 18px;
+}
+
+.eventType {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 14px;
+  opacity: 0.85;
+}
+
+.eventUser {
+  color: var(--dsh-fork-graph-1);
+}
+
+.eventAssistant {
+  color: var(--dsh-fork-graph-4);
+}
+
+.eventTool {
+  color: var(--dsh-fork-graph-2);
+}
+
+.eventOther {
+  color: var(--dsw-alias-label-primary);
+}
+
+.eventText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.eventState {
+  color: var(--dsw-alias-label-primary);
+  opacity: 0.7;
+  line-height: 18px;
+}
+
+.eventErrorDetail {
+  opacity: 0.8;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .historyItem:hover {
@@ -72,7 +161,6 @@ body[data-ds-dark-theme] .graph {
 }
 
 .label {
-  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -86,32 +174,11 @@ body[data-ds-dark-theme] .graph {
   color: var(--dsw-alias-label-secondary);
 }
 
-/* Full-text tooltip on hover: fades in over the ellipsized label. */
-.label::after {
-  content: attr(data-full);
-  position: absolute;
-  left: 0;
-  top: 100%;
-  z-index: 10;
-  max-width: 480px;
-  padding: 4px 8px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-layer-3);
-  color: var(--dsw-alias-label-primary);
-  font-weight: 400;
-  white-space: normal;
-  word-break: break-word;
-  pointer-events: none;
-  opacity: 0;
-  transform: translateY(2px);
-  transition: opacity 0.15s ease-in, transform 0.15s ease-in;
-}
-
-.label:hover::after {
-  opacity: 1;
-  transform: translateY(0);
-}
+/*
+ * Full-text hover went to the official Tooltip primitive (issue #8):
+ * fixed positioning, delay, collision flip — the attr(data-full) bubble
+ * is gone; the label above keeps only its ellipsis.
+ */
 
 /* Branch-name badge — vscode Source Control Graph recipe (scm.css
  * .label-container > .label + _renderBadge): solid fill in the ref's
