@@ -1,0 +1,193 @@
+/*
+ * Branch graph view styles. Lane geometry (22px row height, 11px lane
+ * width, 4px circles) comes from the vendored renderer's constants; the
+ * five-lane palette is defined here as the CSS variables the vendored
+ * asCssVariable shim resolves onto (var(--dsh-fork-graph-1..5) plus the
+ * three ref colors), scoped to the graph root so every row's SVG inherits.
+ * Theme: everything else consumes the --dsw-alias-* variables, which the
+ * theme layer flips wholesale on body[data-ds-dark-theme]; only the lane
+ * palette needs its own dark override (the upstream colors were tuned for
+ * light backgrounds — #994F00 in particular is nearly invisible on dark).
+ */
+
+.graph {
+  --dsh-fork-graph-1: #ffb000;
+  --dsh-fork-graph-2: #dc267f;
+  --dsh-fork-graph-3: #994f00;
+  --dsh-fork-graph-4: #40b0a6;
+  --dsh-fork-graph-5: #b66dff;
+  --dsh-fork-graph-ref: #59a4f9;
+  --dsh-fork-graph-ref-remote: #b180d7;
+  --dsh-fork-graph-ref-base: #ea5c00;
+
+  display: flex;
+  flex-direction: column;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  padding: 4px 0;
+}
+
+/* Dark theme: same hues, lifted for contrast against dark rows. */
+body[data-ds-dark-theme] .graph {
+  --dsh-fork-graph-1: #ffc94d;
+  --dsh-fork-graph-2: #f06ea0;
+  --dsh-fork-graph-3: #d9944d;
+  --dsh-fork-graph-4: #5ccfc4;
+  --dsh-fork-graph-5: #d0a0ff;
+  --dsh-fork-graph-ref: #7cb8fb;
+  --dsh-fork-graph-ref-remote: #c9a3ec;
+  --dsh-fork-graph-ref-base: #ff8a3d;
+}
+
+.historyItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 8px;
+}
+
+.historyItem:hover {
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+/* The current session's HEAD row: the "当前分支" treatment. */
+.current {
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.current .label {
+  font-weight: 600;
+}
+
+.graphContainer {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.label {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Full-text tooltip on hover: fades in over the ellipsized label. */
+.label::after {
+  content: attr(data-full);
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 10;
+  max-width: 480px;
+  padding: 4px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary);
+  font-weight: 400;
+  white-space: normal;
+  word-break: break-word;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 0.15s ease-in, transform 0.15s ease-in;
+}
+
+.label:hover::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Branch-name pill: rounded, translucent, with the branch's lane color dot. */
+.ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-mask-2);
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.refDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.state {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 16px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.errorDetail {
+  color: var(--dsw-alias-label-primary);
+  opacity: 0.6;
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.retry {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.retry:hover {
+  background: var(--dsw-alias-bg-layer-3);
+}
+
+/* Loading skeleton: quiet placeholder bars while the graph loads. */
+.skeletonRow {
+  height: 22px;
+  margin: 0 8px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-skeleton);
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Dangling branches: named but visually demoted — dashed, muted, distinct
+ * from the live graph, never hidden, never a crash. */
+.danglingSection {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-top: 1px dashed var(--dsw-alias-border-l3);
+  opacity: 0.7;
+  font-size: 12px;
+}
+
+.danglingRef {
+  border: 1px dashed var(--dsw-alias-border-l3);
+  border-radius: 999px;
+  padding: 0 8px;
+  line-height: 18px;
+}

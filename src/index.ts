@@ -17,6 +17,9 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { BranchPorts, SourceSessionView } from './branch.js'
 import { BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction } from './command.js'
+import { loadRegistry } from './registry.js'
+import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
+import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { composeAgent, forkWorkspace } from './vendor/fork.js'
@@ -55,13 +58,27 @@ export {
   parseBranchAction,
 } from './command.js'
 export type { BranchAction, BranchCommandResult } from './command.js'
+export {
+  RPC_CHANNEL,
+  createBranchRpcHandler,
+  registerRpcChannel,
+} from './rpc.js'
+export type {
+  BranchRpcPorts,
+  BranchSnapshot,
+  ConnectionRpcLike,
+  RegistrySnapshot,
+  RpcHandler,
+  RpcInternalError,
+  RpcResult,
+} from './rpc.js'
 export { createDomainStore, dshForkDomainSpec } from './store.js'
 export type { DomainLike } from './store.js'
 
 export const name = 'dsh-session-fork'
 
 /** Host services this plugin needs; the web-app bundle provides all. */
-export const inject = ['commands', 'storageDomain', 'sessions', 'sessionPersistence', 'agents', 'apiProxy']
+export const inject = ['commands', 'storageDomain', 'sessions', 'sessionPersistence', 'agents', 'apiProxy', 'connection']
 
 /**
  * Full log (header + events) of each view handed out by {@link makePorts},
@@ -253,14 +270,21 @@ export const branchCommandDefinition = {
 } as const
 
 /**
- * Register `/branch` and own the storage-domain lifecycle. Follows the
- * command-compact lifecycle shape: the registration disposer runs first and
- * the in-flight drain last (composite teardown is LIFO), so a drained
- * handler set cannot receive new invocations afterwards.
+ * Register `/branch`, serve the GUI's custom RPC channel, and own the
+ * storage-domain lifecycle — the same effect shape the command-compact
+ * lifecycle uses. The yields run: command registration, RPC channel
+ * registration, the in-flight command drain, the storage-domain close.
+ * Cordis runs yielded disposers in reverse registration order (LIFO), so
+ * the set tears down atomically with the plugin fiber.
  */
 export async function apply(ctx: Context): Promise<void> {
   const domain = await ctx.storageDomain.open(dshForkDomainSpec)
   const active = new Set<Promise<CommandResult>>()
+
+  // Structural read of the host connection registry (the web-app bundle
+  // provides the connection service). When absent — a non-web host — the
+  // /branch command family still works and only the RPC channel is skipped.
+  const connection = ctx.get('connection') as ConnectionRpcLike | undefined
 
   ctx.effect(function* () {
     yield ctx.commands.register({
@@ -281,6 +305,63 @@ export async function apply(ctx: Context): Promise<void> {
         return operation
       },
     })
+
+    if (connection !== undefined) {
+      const rpcPorts: BranchRpcPorts = {
+        // Live-first workspace resolution, the same order makePorts uses:
+        // the live session store answers first, persistence inspect is the
+        // cold fallback, and a failed inspect means the session is missing.
+        async resolveWorkspaceKey(sessionId) {
+          const live = ctx.sessions.get(sessionId as Session['id'])
+          if (live !== undefined) return live.header.cwd ?? ''
+          try {
+            const inspected = await ctx.sessionPersistence.inspect(sessionId as Session['id'])
+            return inspected.meta.cwd ?? ''
+          } catch {
+            return null
+          }
+        },
+        // One domain record per workspace, exactly like the /branch path.
+        async loadRegistry(workspaceKey) {
+          return loadRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey))
+        },
+        // Graph assembly reads whole logs: live store first, persistence
+        // inspect as the cold fallback — the same order makePorts.readSession
+        // uses, but returning the header lineage facts (seedLength /
+        // parentSession) instead of a fork view.
+        async readSession(sessionId) {
+          const live = ctx.sessions.get(sessionId as Session['id'])
+          if (live !== undefined) {
+            return {
+              header: {
+                ...(live.header.seedLength === undefined ? {} : { seedLength: live.header.seedLength }),
+                ...(live.header.parentSession === undefined
+                  ? {}
+                  : { parentSession: live.header.parentSession as string }),
+              },
+              events: [...live.events],
+            }
+          }
+          try {
+            const inspected = await ctx.sessionPersistence.inspect(sessionId as Session['id'])
+            return {
+              header: {
+                ...(inspected.meta.seedLength === undefined ? {} : { seedLength: inspected.meta.seedLength }),
+                ...(inspected.meta.parentSession === undefined
+                  ? {}
+                  : { parentSession: inspected.meta.parentSession as string }),
+              },
+              events: [...inspected.events],
+            }
+          } catch {
+            return null
+          }
+        },
+        sessionExists: (id) => sessionExists(ctx, id),
+      }
+      yield registerRpcChannel(connection, createBranchRpcHandler(rpcPorts))
+    }
+
     yield async () => { await Promise.allSettled(active) }
     yield async () => { await domain.close() }
   }, 'dsh-session-fork lifecycle')
