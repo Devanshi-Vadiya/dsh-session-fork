@@ -60,16 +60,25 @@ const NO_DANGLING: Promise<GraphRpcResult<readonly string[]>> =
 const NO_EVENTS: Promise<GraphRpcResult<TurnEventsPayloadDto>> =
   Promise.resolve({ ok: true, value: { events: [] } })
 
+const NO_FORK: Promise<GraphRpcResult<{ readonly sessionId: string }>> = Promise.resolve({
+  ok: false,
+  error: { code: 'internal', message: 'unused' },
+})
+
+const SILENT_DIALOG: ViewProps['requestBranchName'] = () => Promise.resolve(undefined)
+
 function mount(
   loadGraph: ViewProps['loadGraph'],
   loadDangling: ViewProps['loadDangling'] = () => NO_DANGLING,
   loadTurnEvents: ViewProps['loadTurnEvents'] = () => NO_EVENTS,
+  createBranch: ViewProps['createBranch'] = () => NO_FORK,
+  requestBranchName: ViewProps['requestBranchName'] = SILENT_DIALOG,
 ): Mounted {
   const container = window.document.createElement('div')
   window.document.body.appendChild(container)
   const root = createRoot(container)
   const props = {
-    sessionId: 's-view', loadGraph, loadDangling, loadTurnEvents, t,
+    sessionId: 's-view', loadGraph, loadDangling, loadTurnEvents, createBranch, requestBranchName, t,
   } as unknown as ViewProps
   act(() => { root.render(<BranchGraphView {...props} />) })
   return { root, container }
@@ -291,6 +300,116 @@ describe('row expansion (issue #8)', () => {
     expect(source).toContain('.events')
     expect(source).toContain('text-overflow: ellipsis')
     expect(source).toContain('.eventType')
+  })
+})
+
+describe('row context menu + fork from here (issue #8)', () => {
+  const EXPANDABLE_GRAPH2: GraphPayloadDto = {
+    nodes: [
+      {
+        id: 's-a:2', parentIds: ['s-a:1'], subject: 'asked for a listing',
+        sessionId: 's-a', turn: 2, endSeq: 9,
+      },
+      { id: 's-a:1', parentIds: [], subject: 'root turn', sessionId: 's-a', turn: 1, endSeq: 3 },
+    ],
+    head: 's-a:2',
+  }
+
+  /** Fire a right-click on the row showing `subject`. */
+  function contextMenuOn(mounted: Mounted, subject: string): void {
+    const row = [...mounted.container.querySelectorAll('[role="button"]')]
+      .find(element => element.textContent?.includes(subject))
+    if (row === undefined) throw new Error(`row with "${subject}" not found`)
+    act(() => {
+      row.dispatchEvent(new window.MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: 40, clientY: 60,
+      }))
+    })
+  }
+
+  test('right-click opens the menu at the pointer; squash is a disabled placeholder', async () => {
+    const mounted = mount(() => Promise.resolve(resultOf(EXPANDABLE_GRAPH2)))
+    await flush()
+    expect(mounted.container.querySelector('[role="menu"]')).toBeNull()
+    contextMenuOn(mounted, 'asked for a listing')
+    const menu = mounted.container.querySelector('[role="menu"]') ?? window.document.querySelector('[role="menu"]')
+    expect(menu).not.toBeNull()
+    const items = [...(menu as HTMLElement).querySelectorAll('[role="menuitem"]')]
+    expect(items.map(item => item.textContent)).toEqual(['#menu.fork', '#menu.squash'])
+    expect((items[1] as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('Fork from here: dialog texts, client gate, fork at endSeq, refresh + toast', async () => {
+    let graphCalls = 0
+    const forkCalls: Array<{ name: string, sessionId: string, atSeq?: number }> = []
+    const dialogTextsSeen: unknown[] = []
+    const requestBranchName: ViewProps['requestBranchName'] = async (submit, texts) => {
+      dialogTextsSeen.push(texts)
+      const first = await submit(' spaced ')
+      if (first.ok) return { sessionId: first.sessionId }
+      const second = await submit('experiment')
+      return second.ok ? { sessionId: second.sessionId } : undefined
+    }
+    const mounted = mount(
+      () => {
+        graphCalls += 1
+        return Promise.resolve(resultOf(EXPANDABLE_GRAPH2))
+      },
+      () => NO_DANGLING,
+      () => NO_EVENTS,
+      async (request) => {
+        if (request.name !== 'experiment') {
+          return { ok: false, error: { code: 'internal', message: 'unreachable' } }
+        }
+        forkCalls.push(request)
+        return { ok: true, value: { sessionId: 's-child-new' } }
+      },
+      requestBranchName,
+    )
+    await flush()
+    contextMenuOn(mounted, 'asked for a listing')
+    const item = [...window.document.querySelectorAll('[role="menuitem"]')]
+      .find(element => element.textContent === '#menu.fork')
+    await act(async () => { item?.click() })
+    await flush()
+    await flush()
+    expect(forkCalls).toEqual([{ name: 'experiment', sessionId: 's-a', atSeq: 9 }])
+    // Success refreshed the graph (initial load + post-fork reload).
+    expect(graphCalls).toBe(2)
+    // The toast announces the created branch (body portal — fixed banner).
+    expect(window.document.body.textContent).toContain('#toast.forkedexperiment')
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('dialog rejection (invalid name) surfaces through the dialog bridge, no fork, no toast', async () => {
+    const submissions: string[] = []
+    const requestBranchName: ViewProps['requestBranchName'] = async (submit) => {
+      const outcome = await submit(' spaced ')
+      submissions.push(outcome.ok ? 'ok' : 'rejected')
+      return undefined
+    }
+    let forkCalls = 0
+    const mounted = mount(
+      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH2)),
+      () => NO_DANGLING,
+      () => NO_EVENTS,
+      async () => {
+        forkCalls += 1
+        return { ok: true, value: { sessionId: 'x' } }
+      },
+      requestBranchName,
+    )
+    await flush()
+    contextMenuOn(mounted, 'asked for a listing')
+    const item = [...window.document.querySelectorAll('[role="menuitem"]')]
+      .find(element => element.textContent === '#menu.fork')
+    await act(async () => { item?.click() })
+    await flush()
+    expect(submissions).toEqual(['rejected'])
+    expect(forkCalls).toBe(0)
+    expect(window.document.body.textContent).not.toContain('#toast.forked')
+    await act(async () => { mounted.root.unmount() })
   })
 })
 

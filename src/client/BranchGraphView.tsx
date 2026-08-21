@@ -17,9 +17,13 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconBranchOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBranchOutline16, Menu, Toast, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
+import { validateBranchName } from '../branch-name.js'
+import type { BranchNameDialogController } from './branch-name-dialog.tsx'
 import {
   rowLaneColor,
   toGraphHistoryModel,
@@ -52,6 +56,20 @@ export interface BranchGraphInjected {
     turn: number,
     signal?: AbortSignal,
   ): Promise<GraphRpcResult<TurnEventsPayloadDto>>
+  /**
+   * Right-click "Fork from here" (issue #8): one host `fork` round trip
+   * with the row's `endSeq` as the `atSeq` anchor.
+   */
+  createBranch(request: {
+    readonly name: string
+    readonly sessionId: string
+    readonly atSeq?: number
+  }): Promise<GraphRpcResult<{ readonly sessionId: string }>>
+  /**
+   * Open the shared branch-name dialog (the same controller the fork
+   * interception uses); resolves the accepted outcome, undefined on cancel.
+   */
+  requestBranchName: BranchNameDialogController['requestName']
 }
 
 type ViewProps = ConvViewProps & InjectFace<BranchGraphInjected> & PropsLocale<typeof NS>
@@ -65,6 +83,8 @@ type LoadState =
 interface RowMeta {
   readonly sessionId: string
   readonly turn: number
+  /** Closing `turn/end` seq — the fork endpoint's atSeq anchor. */
+  readonly endSeq: number
 }
 
 /** Expansion data of one row: cached after the first successful load. */
@@ -93,11 +113,13 @@ function GraphRow({
   viewModel,
   meta,
   loadTurnEvents,
+  onContextMenu,
   t,
 }: {
   readonly viewModel: ISCMHistoryItemViewModel
   readonly meta: RowMeta | undefined
   readonly loadTurnEvents: ViewProps['loadTurnEvents']
+  readonly onContextMenu: (event: ReactMouseEvent, meta: RowMeta) => void
   readonly t: ViewProps['t']
 }) {
   const container = useRef<HTMLDivElement>(null)
@@ -144,8 +166,14 @@ function GraphRow({
       <div
         className={viewModel.kind === 'HEAD' ? `${css.historyItem} ${css.current}` : css.historyItem}
         onClick={toggle}
+        onContextMenu={(event) => {
+          if (meta === undefined) return
+          event.preventDefault()
+          onContextMenu(event, meta)
+        }}
         role={meta === undefined ? undefined : 'button'}
         aria-expanded={meta === undefined ? undefined : expanded}
+        aria-haspopup={meta === undefined ? undefined : 'menu'}
       >
         <div className={css.graphContainer} ref={container} />
         {meta !== undefined && (
@@ -200,12 +228,66 @@ function GraphRow({
   )
 }
 
+/** Where the row context menu opened (viewport coordinates, issue #8). */
+interface RowMenu {
+  readonly x: number
+  readonly y: number
+  readonly meta: RowMeta
+}
+
 /** The branches graph tab body: loads over RPC, then renders the lanes. */
-export function BranchGraphView({ sessionId, loadGraph, loadDangling, loadTurnEvents, t }: ViewProps) {
+export function BranchGraphView({
+  sessionId,
+  loadGraph,
+  loadDangling,
+  loadTurnEvents,
+  createBranch,
+  requestBranchName,
+  t,
+}: ViewProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' })
   const [metaById, setMetaById] = useState<ReadonlyMap<string, RowMeta>>(new Map())
   const [dangling, setDangling] = useState<readonly string[]>([])
   const [attempt, setAttempt] = useState(0)
+  const [menu, setMenu] = useState<RowMenu | null>(null)
+  const [toast, setToast] = useState<{ readonly seq: number; readonly text: string } | null>(null)
+  const toastSeq = useRef(0)
+
+  const showToast = (text: string): void => {
+    toastSeq.current += 1
+    setToast({ seq: toastSeq.current, text })
+  }
+
+  /**
+   * "Fork from here": collect a name through the shared dialog (client
+   * pre-gate, then the host `fork` endpoint with the row's endSeq as the
+   * atSeq anchor), refresh the graph on success, and toast the new branch.
+   * Failures surface inside the dialog's error row; cancel is silent.
+   */
+  const forkFromRow = (meta: RowMeta): void => {
+    let acceptedName = ''
+    void requestBranchName(async (candidate) => {
+      const check = validateBranchName(candidate)
+      if (!check.ok) return { ok: false, message: `${t('fork.invalid')}${check.reason}` }
+      const result = await createBranch({
+        name: candidate,
+        sessionId: meta.sessionId,
+        atSeq: meta.endSeq,
+      })
+      if (!result.ok) return { ok: false, message: result.error.message }
+      acceptedName = candidate
+      return { ok: true, sessionId: result.value.sessionId }
+    }, {
+      title: t('fork.title'),
+      description: t('fork.description'),
+      placeholder: t('fork.placeholder'),
+      confirm: t('fork.confirm'),
+    }).then((accepted) => {
+      if (accepted === undefined) return
+      setAttempt(current => current + 1)
+      showToast(`${t('toast.forked')}${acceptedName}`)
+    })
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -224,8 +306,8 @@ export function BranchGraphView({ sessionId, loadGraph, loadDangling, loadTurnEv
         // issue-#8 metadata simply stay non-expandable).
         const meta = new Map<string, RowMeta>()
         for (const node of result.value.nodes) {
-          if (node.sessionId !== undefined && node.turn !== undefined) {
-            meta.set(node.id, { sessionId: node.sessionId, turn: node.turn })
+          if (node.sessionId !== undefined && node.turn !== undefined && node.endSeq !== undefined) {
+            meta.set(node.id, { sessionId: node.sessionId, turn: node.turn, endSeq: node.endSeq })
           }
         }
         setMetaById(meta)
@@ -276,6 +358,12 @@ export function BranchGraphView({ sessionId, loadGraph, loadDangling, loadTurnEv
   if (state.rows.length === 0 && dangling.length === 0) {
     return <div className={css.state}>{t('state.empty')}</div>
   }
+  const menuEntries: readonly MenuEntry[] = [
+    { id: 'fork', label: t('menu.fork') },
+    // Squash lands in the next stage (issue #8 P4 host endpoint); the row
+    // is a visible placeholder so the menu shape is already final.
+    { id: 'squash', label: t('menu.squash'), disabled: true },
+  ]
   return (
     <div className={css.graph}>
       {state.rows.map(row => (
@@ -284,6 +372,9 @@ export function BranchGraphView({ sessionId, loadGraph, loadDangling, loadTurnEv
           viewModel={row}
           meta={metaById.get(row.historyItem.id)}
           loadTurnEvents={loadTurnEvents}
+          onContextMenu={(event, meta) => {
+            setMenu({ x: event.clientX, y: event.clientY, meta })
+          }}
           t={t}
         />
       ))}
@@ -294,6 +385,24 @@ export function BranchGraphView({ sessionId, loadGraph, loadDangling, loadTurnEv
             <span key={name} className={css.danglingRef}>{name}</span>
           ))}
         </div>
+      )}
+      {/* The row context menu: portal mode, fixed at the pointer (a
+       * zero-size anchor rect at the recorded coordinates). */}
+      <Menu
+        open={menu !== null}
+        anchor={<span className={css.menuAnchor} aria-hidden="true" />}
+        items={menuEntries}
+        portal
+        getAnchorRect={() => (menu === null ? null : new window.DOMRect(menu.x, menu.y, 0, 0))}
+        onSelect={(id) => {
+          const current = menu
+          setMenu(null)
+          if (id === 'fork' && current !== null) forkFromRow(current.meta)
+        }}
+        onClose={() => { setMenu(null) }}
+      />
+      {toast !== null && (
+        <Toast key={toast.seq} text={toast.text} onDone={() => { setToast(null) }} />
       )}
     </div>
   )

@@ -21,7 +21,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // registration) must be in the program for the overlay register call to type.
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { BranchGraphView, type BranchGraphInjected } from './BranchGraphView.tsx'
-import { createForkNameDialog, ForkNameDialog, type ForkTranslate } from './fork-name-dialog.tsx'
+import {
+  BranchNameDialog,
+  createBranchNameDialog,
+  type BranchDialogTranslate,
+} from './branch-name-dialog.tsx'
 import {
   installForkIntercept,
   type ForkEndpointResult,
@@ -96,8 +100,11 @@ export function apply(ctx: Context): void {
   // turn-tail branch button) and route them through the name dialog and
   // the host-side `fork` endpoint. Without the connection service (a
   // non-web host) the patch stays off and official behavior is untouched.
+  // One shared controller backs every branch-naming surface: the fork
+  // interception (issue #3) and the graph's right-click actions (issue
+  // #8) — the overlay below renders whatever request is open.
+  const dialog = createBranchNameDialog()
   if (connection !== undefined) {
-    const dialog = createForkNameDialog()
     installForkIntercept({
       sessions,
       requestName: dialog.requestName,
@@ -109,13 +116,13 @@ export function apply(ctx: Context): void {
     })
     // The dialog mounts as a root-scope overlay entry: the shell's own
     // full-app overlay hole (declared by ui-layout's AppFrame), rendering
-    // nothing unless a fork request is open.
+    // nothing unless a request is open.
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({
       name: 'shell.overlay',
       id: 'fork-name-dialog',
       locale: NS,
-      inject: () => ({ controller: dialog, t: t as ForkTranslate }),
-    }, ForkNameDialog))
+      inject: () => ({ controller: dialog, t: t as BranchDialogTranslate }),
+    }, BranchNameDialog))
   }
 
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
@@ -131,6 +138,24 @@ export function apply(ctx: Context): void {
           connection.rpc.call(RPC_CHANNEL, 'graph', { sessionId }, signal)
         return result as Promise<GraphRpcResult<GraphPayloadDto>>
       },
+      // Right-click "Fork from here" (issue #8): one host `fork` round
+      // trip with the row's endSeq as the atSeq anchor.
+      createBranch: (request: {
+        readonly name: string
+        readonly sessionId: string
+        readonly atSeq?: number
+      }): Promise<GraphRpcResult<{ readonly sessionId: string }>> => {
+        if (connection === undefined) return Promise.resolve(graphUnavailable())
+        const result: Promise<GraphRpcResult> = connection.rpc.call(RPC_CHANNEL, 'fork', {
+          sessionId: request.sessionId,
+          name: request.name,
+          ...(request.atSeq === undefined ? {} : { atSeq: request.atSeq }),
+        })
+        return result as Promise<GraphRpcResult<{ readonly sessionId: string }>>
+      },
+      // The shared branch-name dialog (same controller the fork
+      // interception uses; the overlay renders whichever request is open).
+      requestBranchName: dialog.requestName,
       // Row expansion (issue #8): one turn's full event list, lightweight
       // `{ seq, type, text }` rows summarized host-side.
       loadTurnEvents: (

@@ -18,6 +18,9 @@ export type ForkLocaleKey =
   | 'state.dangling'
   | 'events.loading'
   | 'events.error'
+  | 'menu.fork'
+  | 'menu.squash'
+  | 'toast.forked'
   | 'fork.title'
   | 'fork.description'
   | 'fork.placeholder'
@@ -43,6 +46,9 @@ export const zh: Record<ForkLocaleKey, string> = {
   'state.dangling': '悬空分支(会话已缺失):',
   'events.loading': '加载事件…',
   'events.error': '事件加载失败:',
+  'menu.fork': '从此处 Fork',
+  'menu.squash': 'Squash 到分支',
+  'toast.forked': '已创建分支 ',
   'fork.title': 'Fork 到命名分支',
   'fork.description': '分支名将成为新会话的标题,且在本工作区内唯一。',
   'fork.placeholder': '分支名',
@@ -62,6 +68,9 @@ export const en: Record<ForkLocaleKey, string> = {
   'state.dangling': 'Dangling branches (session missing):',
   'events.loading': 'Loading events…',
   'events.error': 'Failed to load events: ',
+  'menu.fork': 'Fork from here',
+  'menu.squash': 'Squash into branch',
+  'toast.forked': 'Forked branch ',
   'fork.title': 'Fork to a named branch',
   'fork.description': 'The branch name becomes the new session\u2019s title and must be unique in this workspace.',
   'fork.placeholder': 'Branch name',
