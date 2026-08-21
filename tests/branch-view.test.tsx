@@ -22,7 +22,6 @@ import {
   type GraphPayloadDto,
   type GraphRpcResult,
   type RegistryBranchDto,
-  type TurnEventsPayloadDto,
 } from '../src/client/graph-model.ts'
 import { toISCMHistoryItemViewModelArray } from '../src/client/vendor/vscode/scm-history.ts'
 import type { ISCMHistoryItemViewModel } from '../src/client/vendor/vscode/types.ts'
@@ -58,9 +57,6 @@ interface Mounted {
 const NO_BRANCHES: Promise<GraphRpcResult<readonly RegistryBranchDto[]>> =
   Promise.resolve({ ok: true, value: [] })
 
-const NO_EVENTS: Promise<GraphRpcResult<TurnEventsPayloadDto>> =
-  Promise.resolve({ ok: true, value: { events: [] } })
-
 const NO_FORK: Promise<GraphRpcResult<{ readonly sessionId: string }>> = Promise.resolve({
   ok: false,
   error: { code: 'internal', message: 'unused' },
@@ -76,7 +72,6 @@ const SILENT_DIALOG: ViewProps['requestBranchName'] = () => Promise.resolve(unde
 function mount(
   loadGraph: ViewProps['loadGraph'],
   loadBranches: ViewProps['loadBranches'] = () => NO_BRANCHES,
-  loadTurnEvents: ViewProps['loadTurnEvents'] = () => NO_EVENTS,
   createBranch: ViewProps['createBranch'] = () => NO_FORK,
   requestBranchName: ViewProps['requestBranchName'] = SILENT_DIALOG,
   squashBranch: ViewProps['squashBranch'] = () => NO_SQUASH,
@@ -85,7 +80,7 @@ function mount(
   window.document.body.appendChild(container)
   const root = createRoot(container)
   const props = {
-    sessionId: 's-view', loadGraph, loadBranches, loadTurnEvents, createBranch, requestBranchName, squashBranch, t,
+    sessionId: 's-view', loadGraph, loadBranches, createBranch, requestBranchName, squashBranch, t,
   } as unknown as ViewProps
   act(() => { root.render(<BranchGraphView {...props} />) })
   return { root, container }
@@ -195,124 +190,12 @@ describe('BranchGraphView states', () => {
     expect(mounted.container.textContent).not.toContain('#state.dangling')
     await act(async () => { mounted.root.unmount() })
   })
-})
 
-describe('row expansion (issue #8)', () => {
-  /** Payload whose rows carry the issue-#8 data-plane metadata. */
-  const EXPANDABLE_GRAPH: GraphPayloadDto = {
-    nodes: [
-      {
-        id: 's-a:2', parentIds: ['s-a:1'], subject: 'asked for a listing',
-        sessionId: 's-a', turn: 2, endSeq: 9,
-      },
-      { id: 's-a:1', parentIds: [], subject: 'root turn', sessionId: 's-a', turn: 1, endSeq: 3 },
-    ],
-    head: 's-a:2',
-  }
-  const EVENTS: TurnEventsPayloadDto = {
-    events: [
-      { seq: 4, type: 'turn/start', text: 'turn/start' },
-      { seq: 5, type: 'user/message', text: 'list the files' },
-      { seq: 6, type: 'tool/call', text: 'tool bash: {"command":"ls"}' },
-      { seq: 9, type: 'turn/end', text: 'turn/end' },
-    ],
-  }
-
-  /** The expandable row element (meta-carrying rows are role=button). */
-  function expandableRow(mounted: Mounted, id: string): HTMLElement {
-    const rows = [...mounted.container.querySelectorAll('[role="button"]')]
-    const row = rows.find(element => element.textContent?.includes(
-      EXPANDABLE_GRAPH.nodes.find(node => node.id === id)!.subject))
-    if (row === undefined) throw new Error(`row ${id} not found`)
-    return row as HTMLElement
-  }
-
-  test('clicking a row loads its turn events and renders lightweight lines', async () => {
-    const calls: Array<{ sessionId: string, turn: number }> = []
-    const mounted = mount(
-      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
-      () => NO_BRANCHES,
-      (sessionId, turn) => {
-        calls.push({ sessionId, turn })
-        return Promise.resolve({ ok: true, value: EVENTS })
-      },
-    )
-    await flush()
-    await act(async () => { expandableRow(mounted, 's-a:2').click() })
-    await flush()
-    expect(calls).toEqual([{ sessionId: 's-a', turn: 2 }])
-    for (const text of ['list the files', 'tool bash: {"command":"ls"}']) {
-      expect(mounted.container.textContent).toContain(text)
-    }
-    // Type badges ride along, one per event line.
-    const badges = [...mounted.container.querySelectorAll('[data-event-type]')]
-    expect(badges.map(badge => badge.textContent)).toEqual([
-      'turn/start', 'user/message', 'tool/call', 'turn/end',
-    ])
-    // Full summary text rides the official Tooltip primitive (no title
-    // attribute fallback anymore, issue #8).
-    const toolLine = [...mounted.container.querySelectorAll('span')]
-      .find(span => span.textContent === 'tool bash: {"command":"ls"}')
-    expect(toolLine).toBeDefined()
-    expect(mounted.container.querySelector('[title]')).toBeNull()
-    await act(async () => { mounted.root.unmount() })
-  })
-
-  test('a second click collapses; the cached events survive without a re-fetch', async () => {
-    let calls = 0
-    const mounted = mount(
-      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
-      () => NO_BRANCHES,
-      () => {
-        calls += 1
-        return Promise.resolve({ ok: true, value: EVENTS })
-      },
-    )
-    await flush()
-    const row = expandableRow(mounted, 's-a:2')
-    await act(async () => { row.click() })
-    await flush()
-    expect(calls).toBe(1)
-    await act(async () => { row.click() })
-    await flush()
-    expect(calls).toBe(1)
-    expect(mounted.container.textContent).not.toContain('list the files')
-    // Re-expanding is instant and reuses the cache (still one fetch).
-    await act(async () => { row.click() })
-    await flush()
-    expect(calls).toBe(1)
-    expect(mounted.container.textContent).toContain('list the files')
-    await act(async () => { mounted.root.unmount() })
-  })
-
-  test('a failing event fetch renders the error line inside the expansion', async () => {
-    const mounted = mount(
-      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
-      () => NO_BRANCHES,
-      () => Promise.resolve({ ok: false, error: { code: 'internal', message: 'no turn 2' } }),
-    )
-    await flush()
-    await act(async () => { expandableRow(mounted, 's-a:2').click() })
-    await flush()
-    expect(mounted.container.textContent).toContain('#events.error')
-    expect(mounted.container.textContent).toContain('no turn 2')
-    await act(async () => { mounted.root.unmount() })
-  })
-
-  test('rows without issue-#8 metadata stay plain (not expandable)', async () => {
+  test('rows without issue-#8 metadata stay plain (no menu semantics)', async () => {
     const mounted = mount(() => Promise.resolve(resultOf(TWO_BRANCH_GRAPH)))
     await flush()
     expect(mounted.container.querySelectorAll('[role="button"]')).toHaveLength(0)
-    expect(mounted.container.querySelectorAll('[aria-expanded]')).toHaveLength(0)
     await act(async () => { mounted.root.unmount() })
-  })
-
-  test('the expansion subtree is indented to the label column (CSS contract)', () => {
-    const source = readFileSync(
-      new URL('../src/client/BranchGraphView.module.css', import.meta.url), 'utf8')
-    expect(source).toContain('.events')
-    expect(source).toContain('text-overflow: ellipsis')
-    expect(source).toContain('.eventType')
   })
 })
 
@@ -370,7 +253,6 @@ describe('row context menu + fork from here (issue #8)', () => {
         return Promise.resolve(resultOf(EXPANDABLE_GRAPH2))
       },
       () => NO_BRANCHES,
-      () => NO_EVENTS,
       async (request) => {
         if (request.name !== 'experiment') {
           return { ok: false, error: { code: 'internal', message: 'unreachable' } }
@@ -406,7 +288,6 @@ describe('row context menu + fork from here (issue #8)', () => {
     const mounted = mount(
       () => Promise.resolve(resultOf(EXPANDABLE_GRAPH2)),
       () => NO_BRANCHES,
-      () => NO_EVENTS,
       async () => {
         forkCalls += 1
         return { ok: true, value: { sessionId: 'x' } }
@@ -593,7 +474,6 @@ describe('squash into branch (issue #8)', () => {
         return Promise.resolve(resultOf(LINEAGE_GRAPH))
       },
       LINEAGE_LOAD,
-      () => NO_EVENTS,
       () => NO_FORK,
       requestBranchName,
       async (request) => {
@@ -629,7 +509,6 @@ describe('squash into branch (issue #8)', () => {
         return Promise.resolve(resultOf(LINEAGE_GRAPH))
       },
       LINEAGE_LOAD,
-      () => NO_EVENTS,
       () => NO_FORK,
       requestBranchName,
       async () => ({

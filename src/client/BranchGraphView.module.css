@@ -51,91 +51,10 @@ body[data-ds-dark-theme] .graph {
   user-select: none;
 }
 
-/* One row plus its expansion subtree (issue #8 row expansion). */
-.rowBlock {
-  display: flex;
-  flex-direction: column;
-}
-
-/* Expand/collapse twistie, sitting between the lane SVG and the label. */
-.twistie {
-  flex: none;
-  width: 12px;
-  text-align: center;
-  font-size: 10px;
-  color: var(--dsw-alias-label-primary);
-  opacity: 0.7;
-}
-
 /* Zero-size in-place anchor span for the pointer-positioned context menu
  * (the portaled Menu positions itself from getAnchorRect, not this span). */
 .menuAnchor {
   display: none;
-}
-
-/* The turn's event subtree: lightweight text lines indented to the label
- * column, each with a type badge and an ellipsized summary. */
-.events {
-  display: flex;
-  flex-direction: column;
-  padding: 2px 8px 4px 36px;
-  background: var(--dsw-alias-bg-mask-1);
-  font-size: 12px;
-}
-
-.eventRow {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-height: 20px;
-  line-height: 18px;
-}
-
-.eventType {
-  flex: none;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 4px;
-  padding: 0 4px;
-  font-size: 10px;
-  line-height: 14px;
-  opacity: 0.85;
-}
-
-.eventUser {
-  color: var(--dsh-fork-graph-1);
-}
-
-.eventAssistant {
-  color: var(--dsh-fork-graph-4);
-}
-
-.eventTool {
-  color: var(--dsh-fork-graph-2);
-}
-
-.eventOther {
-  color: var(--dsw-alias-label-primary);
-}
-
-.eventText {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.eventState {
-  color: var(--dsw-alias-label-primary);
-  opacity: 0.7;
-  line-height: 18px;
-}
-
-.eventErrorDetail {
-  opacity: 0.8;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 
 .historyItem:hover {

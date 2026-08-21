@@ -30,8 +30,6 @@ import {
   type GraphPayloadDto,
   type GraphRpcResult,
   type RegistryBranchDto,
-  type TurnEventRowDto,
-  type TurnEventsPayloadDto,
 } from './graph-model.ts'
 import { NS } from './locales.ts'
 import {
@@ -52,15 +50,6 @@ export interface BranchGraphInjected {
    * rows offer the squash action (issue #8).
    */
   loadBranches(signal?: AbortSignal): Promise<GraphRpcResult<readonly RegistryBranchDto[]>>
-  /**
-   * Load one turn's full event list for row expansion (issue #8): every
-   * event of the turn span, each with a one-line summary text.
-   */
-  loadTurnEvents(
-    sessionId: string,
-    turn: number,
-    signal?: AbortSignal,
-  ): Promise<GraphRpcResult<TurnEventsPayloadDto>>
   /**
    * Right-click "Fork from here" (issue #8): one host `fork` round trip
    * with the row's `endSeq` as the `atSeq` anchor.
@@ -101,44 +90,24 @@ interface RowMeta {
   readonly endSeq: number
 }
 
-/** Expansion data of one row: cached after the first successful load. */
-type ExpansionData =
-  | { readonly kind: 'idle' }
-  | { readonly kind: 'loading' }
-  | { readonly kind: 'error'; readonly message: string }
-  | { readonly kind: 'ready'; readonly events: readonly TurnEventRowDto[] }
-
-/** Badge class of one event type: user/assistant/tool/other. */
-function eventKindClass(type: string): string {
-  if (type.startsWith('user')) return css.eventUser
-  if (type.startsWith('assistant')) return css.eventAssistant
-  if (type.startsWith('tool')) return css.eventTool
-  return css.eventOther
-}
-
 /**
  * One graph row: the rendered swimlane SVG plus the turn's label and ref
- * pills — and, since issue #8, an expandable event subtree: clicking the
- * row (or its twistie) lazily loads the turn's events through
- * {@link BranchGraphInjected.loadTurnEvents} and caches them; clicking
- * again collapses. Loading and failures render as lightweight states.
+ * pills. Rows carrying issue-#8 metadata open the right-click menu
+ * (fork/squash); the click-to-expand event subtree is offline for now
+ * (the host `turnEvents` endpoint is kept for its planned return).
  */
 function GraphRow({
   viewModel,
   meta,
-  loadTurnEvents,
   onContextMenu,
   t,
 }: {
   readonly viewModel: ISCMHistoryItemViewModel
   readonly meta: RowMeta | undefined
-  readonly loadTurnEvents: ViewProps['loadTurnEvents']
   readonly onContextMenu: (event: ReactMouseEvent, meta: RowMeta) => void
   readonly t: ViewProps['t']
 }) {
   const container = useRef<HTMLDivElement>(null)
-  const [expanded, setExpanded] = useState(false)
-  const [data, setData] = useState<ExpansionData>({ kind: 'idle' })
   useEffect(() => {
     const host = container.current
     if (host === null) return
@@ -149,51 +118,19 @@ function GraphRow({
   // The badge fill: the row's lane color (vscode paints refs with their
   // own swimlane color; the fallback mirrors the renderer's default).
   const badgeColor = asCssVariable(rowLaneColor(viewModel) ?? 'scmGraph.historyItemRefColor')
-  const toggle = (): void => {
-    if (meta === undefined) return
-    if (expanded) {
-      setExpanded(false)
-      return
-    }
-    setExpanded(true)
-    if (data.kind === 'idle') {
-      // First expansion fetches once; the result is cached, so later
-      // expand/collapse cycles are instant and offline.
-      setData({ kind: 'loading' })
-      loadTurnEvents(meta.sessionId, meta.turn).then(
-        (result) => {
-          setData(result.ok
-            ? { kind: 'ready', events: result.value.events }
-            : { kind: 'error', message: result.error.message })
-        },
-        (error: unknown) => {
-          setData({
-            kind: 'error',
-            message: error instanceof Error ? error.message : String(error),
-          })
-        },
-      )
-    }
-  }
   return (
-    <div className={css.rowBlock}>
-      <div
-        className={viewModel.kind === 'HEAD' ? `${css.historyItem} ${css.current}` : css.historyItem}
-        onClick={toggle}
-        onContextMenu={(event) => {
-          if (meta === undefined) return
-          event.preventDefault()
-          onContextMenu(event, meta)
-        }}
-        role={meta === undefined ? undefined : 'button'}
-        aria-expanded={meta === undefined ? undefined : expanded}
-        aria-haspopup={meta === undefined ? undefined : 'menu'}
-      >
-        <div className={css.graphContainer} ref={container} />
-        {meta !== undefined && (
-          <span className={css.twistie} aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-        )}
-        <Tooltip
+    <div
+      className={viewModel.kind === 'HEAD' ? `${css.historyItem} ${css.current}` : css.historyItem}
+      onContextMenu={(event) => {
+        if (meta === undefined) return
+        event.preventDefault()
+        onContextMenu(event, meta)
+      }}
+      role={meta === undefined ? undefined : 'button'}
+      aria-haspopup={meta === undefined ? undefined : 'menu'}
+    >
+      <div className={css.graphContainer} ref={container} />
+      <Tooltip
           label={viewModel.historyItem.subject}
           side="bottom"
           delayMs={300}
@@ -217,28 +154,6 @@ function GraphRow({
           </div>
         )}
       </div>
-      {expanded && meta !== undefined && (
-        <div className={css.events}>
-          {data.kind === 'loading' && <div className={css.eventState}>{t('events.loading')}</div>}
-          {data.kind === 'error' && (
-            <div className={css.eventState}>
-              {t('events.error')}
-              <span className={css.eventErrorDetail}>{data.message}</span>
-            </div>
-          )}
-          {data.kind === 'ready' && data.events.map(event => (
-            <div key={event.seq} className={css.eventRow}>
-              <span className={`${css.eventType} ${eventKindClass(event.type)}`} data-event-type={event.type}>
-                {event.type}
-              </span>
-              <Tooltip label={event.text} side="bottom" delayMs={300} maxWidth={480}>
-                <span className={css.eventText}>{event.text}</span>
-              </Tooltip>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   )
 }
 
@@ -256,7 +171,6 @@ export function BranchGraphView({
   sessionId,
   loadGraph,
   loadBranches,
-  loadTurnEvents,
   createBranch,
   squashBranch,
   requestBranchName,
@@ -437,7 +351,6 @@ export function BranchGraphView({
           key={row.historyItem.id}
           viewModel={row}
           meta={metaById.get(row.historyItem.id)}
-          loadTurnEvents={loadTurnEvents}
           onContextMenu={(event, meta) => {
             setMenu({
               x: event.clientX,
