@@ -5,6 +5,8 @@
     "moduleResolution": "NodeNext",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": [],
+    "jsx": "react-jsx",
+    "allowImportingTsExtensions": true,
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -12,5 +14,5 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true
   },
-  "include": ["./**/*.ts"]
+  "include": ["./**/*.ts", "./**/*.tsx"]
 }

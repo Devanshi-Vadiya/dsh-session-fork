@@ -1,0 +1,78 @@
+/*
+ * Branch graph view styles. Lane geometry (22px row height, 11px lane
+ * width, 4px circles) comes from the vendored renderer's constants; the
+ * five-lane palette is defined here as the CSS variables the vendored
+ * asCssVariable shim resolves onto (var(--dsh-fork-graph-1..5) plus the
+ * three ref colors), scoped to the graph root so every row's SVG inherits.
+ */
+
+.graph {
+  --dsh-fork-graph-1: #ffb000;
+  --dsh-fork-graph-2: #dc267f;
+  --dsh-fork-graph-3: #994f00;
+  --dsh-fork-graph-4: #40b0a6;
+  --dsh-fork-graph-5: #b66dff;
+  --dsh-fork-graph-ref: #59a4f9;
+  --dsh-fork-graph-ref-remote: #b180d7;
+  --dsh-fork-graph-ref-base: #ea5c00;
+
+  display: flex;
+  flex-direction: column;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  padding: 4px 0;
+}
+
+.historyItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 8px;
+}
+
+.historyItem:hover {
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.graphContainer {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ref {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.state {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 16px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.errorDetail {
+  color: var(--dsw-alias-label-primary);
+  opacity: 0.6;
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

@@ -27,6 +27,8 @@
  */
 
 import { z } from 'zod'
+import { assembleBranchGraph } from './graph.js'
+import type { BranchGraph, BranchLike, GraphNode, GraphNodeRef, GraphSessionLog } from './graph.js'
 import { listBranches } from './registry.js'
 import type { ForkOrigin, RegistryState, SessionExists } from './types.js'
 
@@ -113,7 +115,9 @@ export interface RegistrySnapshot {
   readonly branches: readonly BranchSnapshot[]
 }
 
-/** Payload contract of the `registry` endpoint. */
+export type { BranchGraph, GraphNode, GraphNodeRef, GraphSessionLog }
+
+/** Payload contract shared by both endpoints. */
 const registryPayloadSchema = z.object({
   sessionId: z.string().min(1),
 })
@@ -132,6 +136,12 @@ export interface BranchRpcPorts {
   resolveWorkspaceKey(sessionId: string): Promise<string | null>
   /** Load the branch registry of one workspace key (never-written → empty state). */
   loadRegistry(workspaceKey: string): Promise<RegistryState>
+  /**
+   * Read one session's log (header lineage facts + events) for graph
+   * assembly — live session store first, persistence inspect as fallback.
+   * `null` when the session does not exist (its branch degrades by omission).
+   */
+  readSession(sessionId: string): Promise<GraphSessionLog | null>
   /** Liveness check used for dangling marking. */
   readonly sessionExists: SessionExists
 }
@@ -144,6 +154,10 @@ export interface BranchRpcPorts {
  *   key, loads that workspace's registry, and returns
  *   `{ branches: [{ name, sessionId, forkOrigin, createdAt, dangling }] }`
  *   (sorted by name, dangling refs marked through `sessionExists`).
+ * - `graph` — payload `{ sessionId }`; assembles the workspace's branch
+ *   graph ({@link BranchGraph}: newest-first turn nodes with lineage and
+ *   branch-name refs, plus the payload session's head node id) from the
+ *   registry plus the branch sessions' logs.
  *
  * Anything else — unknown endpoints, malformed payloads, missing sessions,
  * thrown port failures — folds into `{ ok: false, error: { code: 'internal',
@@ -152,7 +166,7 @@ export interface BranchRpcPorts {
  */
 export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
   return async (endpoint, payload) => {
-    if (endpoint !== 'registry') {
+    if (endpoint !== 'registry' && endpoint !== 'graph') {
       return internalError(
         `unknown endpoint ${JSON.stringify(endpoint)} on channel ${JSON.stringify(RPC_CHANNEL)}`,
       )
@@ -163,13 +177,26 @@ export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
         const issues = parsed.error.issues
           .map(issue => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
           .join('; ')
-        return internalError(`invalid "registry" payload: ${issues}`)
+        return internalError(`invalid "${endpoint}" payload: ${issues}`)
       }
       const workspaceKey = await ports.resolveWorkspaceKey(parsed.data.sessionId)
       if (workspaceKey === null) {
         return internalError(`no session named ${JSON.stringify(parsed.data.sessionId)} exists`)
       }
       const state = await ports.loadRegistry(workspaceKey)
+      if (endpoint === 'graph') {
+        const branches: BranchLike[] = Object.values(state.branches).map(record => ({
+          name: record.name,
+          sessionId: record.sessionId,
+          forkOrigin: record.forkOrigin === null ? null : { ...record.forkOrigin },
+        }))
+        const value: BranchGraph = await assembleBranchGraph(
+          branches,
+          parsed.data.sessionId,
+          ports.readSession,
+        )
+        return { ok: true, value }
+      }
       const listings = await listBranches(state, ports.sessionExists)
       const value: RegistrySnapshot = {
         branches: listings.map(({ record, dangling }) => ({

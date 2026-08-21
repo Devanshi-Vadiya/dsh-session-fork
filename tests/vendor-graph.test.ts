@@ -176,6 +176,17 @@ describe('renderSCMHistoryItemGraph', () => {
     // width = SWIMLANE_WIDTH * (max(input, output, 1) + 1) = 11 * 3.
     expect(svg.style.width).toBe('33px')
   })
+
+  test('the fork lane merge renders arc-segmented paths', () => {
+    // Two children of b (y keeps b's lane, x spawns the right lane); at b's
+    // row the spawned lane curves back into the circle's lane — a visual
+    // path only the arc ('A ') command family can draw.
+    const vms = renderVms([item('y', ['b']), item('x', ['b']), item('b', ['a']), item('a', [])])
+    const svg = renderSCMHistoryItemGraph(vms[2]!)
+    const arcPaths = [...svg.querySelectorAll('path')]
+      .filter(path => (path.getAttribute('d') ?? '').includes('A '))
+    expect(arcPaths.length).toBeGreaterThan(0)
+  })
 })
 
 describe('vendor marker integrity', () => {

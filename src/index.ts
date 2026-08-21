@@ -325,6 +325,38 @@ export async function apply(ctx: Context): Promise<void> {
         async loadRegistry(workspaceKey) {
           return loadRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey))
         },
+        // Graph assembly reads whole logs: live store first, persistence
+        // inspect as the cold fallback — the same order makePorts.readSession
+        // uses, but returning the header lineage facts (seedLength /
+        // parentSession) instead of a fork view.
+        async readSession(sessionId) {
+          const live = ctx.sessions.get(sessionId as Session['id'])
+          if (live !== undefined) {
+            return {
+              header: {
+                ...(live.header.seedLength === undefined ? {} : { seedLength: live.header.seedLength }),
+                ...(live.header.parentSession === undefined
+                  ? {}
+                  : { parentSession: live.header.parentSession as string }),
+              },
+              events: [...live.events],
+            }
+          }
+          try {
+            const inspected = await ctx.sessionPersistence.inspect(sessionId as Session['id'])
+            return {
+              header: {
+                ...(inspected.meta.seedLength === undefined ? {} : { seedLength: inspected.meta.seedLength }),
+                ...(inspected.meta.parentSession === undefined
+                  ? {}
+                  : { parentSession: inspected.meta.parentSession as string }),
+              },
+              events: [...inspected.events],
+            }
+          } catch {
+            return null
+          }
+        },
         sessionExists: (id) => sessionExists(ctx, id),
       }
       yield registerRpcChannel(connection, createBranchRpcHandler(rpcPorts))
