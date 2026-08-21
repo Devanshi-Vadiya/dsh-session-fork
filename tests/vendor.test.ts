@@ -1,14 +1,17 @@
 /**
  * Tests for the vendored fork helpers: the seed-balance invariant (orphan
- * `command/run` must never enter a seed) and vendor-replication marker
- * integrity.
+ * `command/run` must never enter a seed), the ensureSession resume kernel,
+ * and vendor-replication marker integrity.
  * @module dsh-session-fork/tests/vendor.test
  */
 
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SourceEvent } from '../src/branch.js'
-import { anchoredBoundaryOf } from '../src/vendor/fork.js'
+import { anchoredBoundaryOf, getOrResumeAgent } from '../src/vendor/fork.js'
+import type { GetOrResumeDeps, ReadSessionState } from '../src/vendor/fork.js'
 
 /** Build a fake event; `data` defaults to nothing. */
 function ev(seq: number, type: string, data?: unknown): SourceEvent {
@@ -106,16 +109,19 @@ describe('vendor marker integrity', () => {
   const markers = (kind: string): number =>
     source.match(new RegExp(`^\\s*// \\[fork:${kind}\\]`, 'gm'))?.length ?? 0
 
-  test('exactly one [fork:surgery] marker', () => {
-    expect(markers('surgery')).toBe(1)
+  test('exactly two [fork:surgery] markers', () => {
+    expect(markers('surgery')).toBe(2)
   })
 
-  test('exactly two [fork:adapt] markers', () => {
-    expect(markers('adapt')).toBe(2)
+  test('exactly four [fork:adapt] markers', () => {
+    expect(markers('adapt')).toBe(4)
   })
 
-  test('records the upstream commit SHA', () => {
+  test('records the upstream commit SHAs', () => {
+    // The three original helpers keep their 99f6f02f citations; the later
+    // getOrResumeAgent kernel records the checkout's current 528c682e.
     expect(source).toContain('99f6f02fecdb7dff40c3fbc9470f5907c29f74ca')
+    expect(source).toContain('528c682e061696f5a160f363f236ecbf53cbd006')
   })
 })
 
@@ -158,5 +164,103 @@ describe('vendored compact engine marker integrity', () => {
 
   test('exactly seven [fork:adapt] markers', () => {
     expect(markers('adapt')).toBe(7)
+  })
+})
+
+describe('vendored getOrResumeAgent kernel', () => {
+  const parentSessionId = 'session-parent' as Session['id']
+
+  /** Minimal agent fake. */
+  function fakeAgent(id: string): Agent {
+    return { id, session: { id } } as unknown as Agent
+  }
+
+  /** Minimal persisted state fake; the kernel only feeds it to resolveSessionPreset. */
+  function storedParent(): ReadSessionState {
+    return { header: { id: parentSessionId } as unknown as SessionHeader, events: [] }
+  }
+
+  test('a live agent short-circuits before any resume', async () => {
+    const live = fakeAgent('live-parent')
+    let resumeCalls = 0
+    const deps: GetOrResumeDeps = {
+      get: () => live,
+      readState: async () => storedParent(),
+      composeSetup: async () => ({ setup: async () => { } }),
+      resume: async () => {
+        resumeCalls += 1
+        return { agent: fakeAgent('resumed') }
+      },
+    }
+    await expect(getOrResumeAgent(deps, parentSessionId)).resolves.toBe(live)
+    expect(resumeCalls).toBe(0)
+  })
+
+  test('concurrent calls for the same cold parent share one resume (memo dedup)', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const resumed = fakeAgent('resumed-parent')
+    let resumeCalls = 0
+    const deps: GetOrResumeDeps = {
+      get: () => undefined,
+      readState: async () => storedParent(),
+      composeSetup: async () => ({ setup: async () => { } }),
+      resume: async () => {
+        resumeCalls += 1
+        await gate
+        return { agent: resumed }
+      },
+    }
+    const first = getOrResumeAgent(deps, parentSessionId)
+    const second = getOrResumeAgent(deps, parentSessionId)
+    release()
+    const [a, b] = await Promise.all([first, second])
+    expect(resumeCalls).toBe(1)
+    expect(a).toBe(resumed)
+    expect(b).toBe(resumed)
+  })
+
+  test('recovery catch: a failing resume returns the concurrently published live agent', async () => {
+    let live: Agent | undefined
+    const winner = fakeAgent('other-path-winner')
+    const deps: GetOrResumeDeps = {
+      get: () => live,
+      readState: async () => storedParent(),
+      composeSetup: async () => ({ setup: async () => { } }),
+      resume: async () => {
+        // Another Host entry path published the same identity while this
+        // resume crossed an asynchronous persistence step.
+        live = winner
+        throw new Error('already registered')
+      },
+    }
+    await expect(getOrResumeAgent(deps, parentSessionId)).resolves.toBe(winner)
+  })
+
+  test('without a recovered live agent the resume failure propagates', async () => {
+    const deps: GetOrResumeDeps = {
+      get: () => undefined,
+      readState: async () => storedParent(),
+      composeSetup: async () => ({ setup: async () => { } }),
+      resume: async () => {
+        throw new Error('already registered')
+      },
+    }
+    await expect(getOrResumeAgent(deps, parentSessionId)).rejects.toThrow('already registered')
+  })
+
+  test('a missing parent throws instead of creating a session (no create branch)', async () => {
+    let resumeCalls = 0
+    const deps: GetOrResumeDeps = {
+      get: () => undefined,
+      readState: async () => null,
+      composeSetup: async () => ({ setup: async () => { } }),
+      resume: async () => {
+        resumeCalls += 1
+        return { agent: fakeAgent('resumed') }
+      },
+    }
+    await expect(getOrResumeAgent(deps, parentSessionId)).rejects.toThrow(/not found/)
+    expect(resumeCalls).toBe(0)
   })
 })
