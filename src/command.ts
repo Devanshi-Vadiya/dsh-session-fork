@@ -8,7 +8,7 @@
 
 import type { BranchPorts } from './branch.js'
 import { BranchForkError, createBranchFrom as forkToBranch, createRootBranch as adoptAsRoot } from './branch.js'
-import type { BranchListing, RegistryState, RegistryStore, SessionExists } from './types.js'
+import type { BranchListing, BranchRecord, RegistryState, RegistryStore, SessionExists } from './types.js'
 import {
   BranchRegistryError,
   assertBranchNameFree,
@@ -112,6 +112,49 @@ function renderLine(listing: BranchListing): string {
 }
 
 /**
+ * Shared core of `/branch create` and the GUI `fork` RPC endpoint: the full
+ * named-fork pipeline with the registry as the authority.
+ *
+ * Order is load-bearing: the name is pre-checked against the registry
+ * BEFORE forking (a duplicate/invalid name must fail without spawning an
+ * orphan child session), the fork runs through the official agent path,
+ * and the record is written only after the child exists. The post-fork
+ * `createBranch` stays as the authoritative registry gate for the race
+ * window the pre-check cannot close.
+ *
+ * @param name - prospective branch name (validated, uniqueness-checked).
+ * @param deps - command-shaped capabilities (session id, store, ports).
+ * @param options.atSeq - optional in-log anchor (fork through the turn
+ *   containing this event seq); omitted means the last completed turn.
+ * @returns the frozen record of the created branch.
+ * @throws {BranchRegistryError} `invalid-name` / `duplicate-name` (pre-fork),
+ *   {@link BranchForkError} on fork/rename failure, `BranchRegistryError`
+ *   on the post-fork write (child stays listed like any anonymous fork).
+ */
+export async function createNamedBranch(
+  name: string,
+  deps: BranchCommandDeps,
+  options: { readonly atSeq?: number } = {},
+): Promise<BranchRecord> {
+  const preState = await loadRegistry(deps.store)
+  assertBranchNameFree(preState, name)
+  const record = await forkToBranch(
+    deps.currentSessionId,
+    name,
+    deps.ports,
+    options.atSeq === undefined ? {} : { atSeq: options.atSeq },
+  )
+  const state = createBranch(preState, {
+    name: record.name,
+    sessionId: record.sessionId,
+    forkOrigin: record.forkOrigin,
+    createdAt: record.createdAt,
+  })
+  await saveRegistry(deps.store, state)
+  return record
+}
+
+/**
  * Execute one parsed action against the registry. All failures return
  * `kind: 'error'` results — a command must never crash the host.
  */
@@ -136,36 +179,12 @@ export async function executeBranchAction(
     }
 
     case 'create': {
-      // Pre-check the name BEFORE forking: a duplicate/invalid name must
-      // fail without having spawned an orphan child session. The post-fork
-      // createBranch below stays as the authoritative registry gate.
-      const preState = await loadRegistry(deps.store)
-      try {
-        assertBranchNameFree(preState, action.name)
-      } catch (error) {
-        return { kind: 'error', text: branchErrorMessage(error) }
-      }
       let record
       try {
-        record = await forkToBranch(deps.currentSessionId, action.name, deps.ports)
+        record = await createNamedBranch(action.name, deps)
       } catch (error) {
         return { kind: 'error', text: branchErrorMessage(error) }
       }
-      let state = preState
-      try {
-        state = createBranch(state, {
-          name: record.name,
-          sessionId: record.sessionId,
-          forkOrigin: record.forkOrigin,
-          createdAt: record.createdAt,
-        })
-      } catch (error) {
-        // The fork already happened; surface the duplicate-name failure and
-        // let the user rename or rm the existing ref. The unreferenced child
-        // session stays in the session list like any anonymous fork.
-        return { kind: 'error', text: branchErrorMessage(error) }
-      }
-      await saveRegistry(deps.store, state)
       const origin =
         record.forkOrigin === null
           ? 'root branch'
@@ -245,8 +264,9 @@ class BranchLookupFailure extends BranchRegistryError {
   }
 }
 
-/** Map registry/fork typed errors to user-facing text. */
-function branchErrorMessage(error: unknown): string {
+/** Map registry/fork typed errors to user-facing text (commands and the
+ * GUI `fork` RPC endpoint share this rendering). */
+export function branchErrorMessage(error: unknown): string {
   if (error instanceof BranchForkError) {
     return error.message
   }
