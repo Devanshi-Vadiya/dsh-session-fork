@@ -157,3 +157,4 @@ temp/
 lib/
 .tmp/
 package-lock.json
+.tmp-commit-msg

@@ -149,6 +149,22 @@ describe('vendored session-title limit integrity', () => {
   })
 })
 
+describe('vendored session-title normalize integrity', () => {
+  const source = readFileSync(new URL('../src/vendor/session-title-normalize.ts', import.meta.url), 'utf8')
+  const markers = (kind: string): number =>
+    source.match(new RegExp(`^\\s*// \\[fork:${kind}\\]`, 'gm'))?.length ?? 0
+
+  test('exactly one [fork:adapt] marker (Buffer → TextEncoder) and no surgery', () => {
+    expect(markers('adapt')).toBe(1)
+    expect(markers('surgery')).toBe(0)
+  })
+
+  test('records the upstream commit SHA and the exact source file', () => {
+    expect(source).toContain('528c682e061696f5a160f363f236ecbf53cbd006')
+    expect(source).toContain('packages/session/session-title/src/normalize.ts')
+  })
+})
+
 describe('vendored compact engine marker integrity', () => {
   const source = readFileSync(new URL('../src/vendor/compact.ts', import.meta.url), 'utf8')
   const markers = (kind: string): number =>

@@ -20,7 +20,7 @@ import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type { BranchPorts, SourceSessionView } from './branch.js'
 import { BranchForkError } from './branch.js'
-import { executeBranchAction, parseBranchAction } from './command.js'
+import { executeBranchAction, parseBranchAction, createNamedBranch } from './command.js'
 import { loadRegistry } from './registry.js'
 import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
 import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
@@ -61,6 +61,8 @@ export type {
 } from './branch.js'
 export {
   BRANCH_USAGE,
+  branchErrorMessage,
+  createNamedBranch,
   executeBranchAction,
   parseBranchAction,
 } from './command.js'
@@ -74,6 +76,7 @@ export type {
   BranchRpcPorts,
   BranchSnapshot,
   ConnectionRpcLike,
+  ForkValue,
   RegistrySnapshot,
   RpcHandler,
   RpcInternalError,
@@ -278,6 +281,24 @@ async function sessionExists(ctx: Context, sessionId: string): Promise<boolean> 
 }
 
 /**
+ * Live-first workspace-key resolution (the session's `cwd`, `''` when
+ * unset): the live session store answers first, persistence inspect is the
+ * cold fallback, and a failed inspect means the session is missing
+ * (`null`). Shared by the RPC read endpoints and the `fork` endpoint's
+ * store selection.
+ */
+async function resolveWorkspaceKey(ctx: Context, sessionId: string): Promise<string | null> {
+  const live = ctx.sessions.get(sessionId as Session['id'])
+  if (live !== undefined) return live.header.cwd ?? ''
+  try {
+    const inspected = await ctx.sessionPersistence.inspect(sessionId as Session['id'])
+    return inspected.meta.cwd ?? ''
+  } catch {
+    return null
+  }
+}
+
+/**
  * The `/branch` command definition registered by {@link apply}.
  *
  * The `input` descriptor is load-bearing: the web client's admission
@@ -341,19 +362,8 @@ export async function apply(ctx: Context): Promise<void> {
 
     if (connection !== undefined) {
       const rpcPorts: BranchRpcPorts = {
-        // Live-first workspace resolution, the same order makePorts uses:
-        // the live session store answers first, persistence inspect is the
-        // cold fallback, and a failed inspect means the session is missing.
-        async resolveWorkspaceKey(sessionId) {
-          const live = ctx.sessions.get(sessionId as Session['id'])
-          if (live !== undefined) return live.header.cwd ?? ''
-          try {
-            const inspected = await ctx.sessionPersistence.inspect(sessionId as Session['id'])
-            return inspected.meta.cwd ?? ''
-          } catch {
-            return null
-          }
-        },
+        // Live-first workspace resolution, the same order makePorts uses.
+        resolveWorkspaceKey: (sessionId) => resolveWorkspaceKey(ctx, sessionId),
         // One domain record per workspace, exactly like the /branch path.
         async loadRegistry(workspaceKey) {
           return loadRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey))
@@ -391,6 +401,24 @@ export async function apply(ctx: Context): Promise<void> {
           }
         },
         sessionExists: (id) => sessionExists(ctx, id),
+        // The hijacked fork button's write path: the exact /branch create
+        // pipeline, with the source session's workspace registry as the
+        // authority. A missing source fails before any store selection.
+        async createBranch({ name, sourceSessionId, atSeq }) {
+          const workspaceKey = await resolveWorkspaceKey(ctx, sourceSessionId)
+          if (workspaceKey === null) {
+            throw new BranchForkError(
+              'source-not-found',
+              `no session named '${sourceSessionId}' exists`,
+            )
+          }
+          return createNamedBranch(name, {
+            currentSessionId: sourceSessionId,
+            store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+            ports: makePorts(ctx),
+            sessionExists: (id) => sessionExists(ctx, id),
+          }, atSeq === undefined ? {} : { atSeq })
+        },
       }
       yield registerRpcChannel(connection, createBranchRpcHandler(rpcPorts))
     }

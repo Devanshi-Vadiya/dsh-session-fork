@@ -16,6 +16,13 @@ export type ForkLocaleKey =
   | 'state.retry'
   | 'state.empty'
   | 'state.dangling'
+  | 'fork.title'
+  | 'fork.description'
+  | 'fork.placeholder'
+  | 'fork.cancel'
+  | 'fork.confirm'
+  | 'fork.close'
+  | 'fork.invalid'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -32,6 +39,13 @@ export const zh: Record<ForkLocaleKey, string> = {
   'state.retry': '重试',
   'state.empty': '还没有分支。试试 /branch create <name>',
   'state.dangling': '悬空分支(会话已缺失):',
+  'fork.title': 'Fork 到命名分支',
+  'fork.description': '分支名将成为新会话的标题,且在本工作区内唯一。',
+  'fork.placeholder': '分支名',
+  'fork.cancel': '取消',
+  'fork.confirm': 'Fork',
+  'fork.close': '关闭',
+  'fork.invalid': '无效的分支名:',
 }
 
 /** English dictionary. */
@@ -42,4 +56,11 @@ export const en: Record<ForkLocaleKey, string> = {
   'state.retry': 'Retry',
   'state.empty': 'No branches yet. Try /branch create <name>',
   'state.dangling': 'Dangling branches (session missing):',
+  'fork.title': 'Fork to a named branch',
+  'fork.description': 'The branch name becomes the new session\u2019s title and must be unique in this workspace.',
+  'fork.placeholder': 'Branch name',
+  'fork.cancel': 'Cancel',
+  'fork.confirm': 'Fork',
+  'fork.close': 'Close',
+  'fork.invalid': 'Invalid branch name: ',
 }

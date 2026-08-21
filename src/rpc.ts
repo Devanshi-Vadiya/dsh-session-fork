@@ -27,6 +27,7 @@
  */
 
 import { z } from 'zod'
+import { branchErrorMessage } from './command.js'
 import { assembleBranchGraph } from './graph.js'
 import type { BranchGraph, BranchLike, GraphNode, GraphNodeRef, GraphSessionLog } from './graph.js'
 import { listBranches } from './registry.js'
@@ -117,10 +118,26 @@ export interface RegistrySnapshot {
 
 export type { BranchGraph, GraphNode, GraphNodeRef, GraphSessionLog }
 
-/** Payload contract shared by both endpoints. */
+/** Payload contract shared by the read endpoints. */
 const registryPayloadSchema = z.object({
   sessionId: z.string().min(1),
 })
+
+/**
+ * Payload contract of the `fork` endpoint (the hijacked official fork
+ * button's wire shape): which session, optional in-log turn anchor, and
+ * the mandatory branch name the dialog collected.
+ */
+const forkPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  name: z.string(),
+  atSeq: z.number().int().nonnegative().optional(),
+})
+
+/** Success value of the `fork` endpoint: the created child session id. */
+export interface ForkValue {
+  readonly sessionId: string
+}
 
 /**
  * Capabilities the RPC handler needs. Production wires live ctx reads in
@@ -144,6 +161,20 @@ export interface BranchRpcPorts {
   readSession(sessionId: string): Promise<GraphSessionLog | null>
   /** Liveness check used for dangling marking. */
   readonly sessionExists: SessionExists
+  /**
+   * Create a named branch fork — the `/branch create` pipeline
+   * ({@link createNamedBranch}) with the source session's workspace
+   * registry as the authority. Serves the `fork` endpoint the hijacked
+   * official fork button calls.
+   * @throws with a user-facing message (see `branchErrorMessage`) on an
+   *   invalid/duplicate name (before any fork side effect), a missing
+   *   source session, or a fork/rename failure.
+   */
+  createBranch(request: {
+    readonly name: string
+    readonly sourceSessionId: string
+    readonly atSeq?: number
+  }): Promise<ForkValue>
 }
 
 /**
@@ -158,6 +189,11 @@ export interface BranchRpcPorts {
  *   graph ({@link BranchGraph}: newest-first turn nodes with lineage and
  *   branch-name refs, plus the payload session's head node id) from the
  *   registry plus the branch sessions' logs.
+ * - `fork` — payload `{ sessionId, name, atSeq? }`; runs the full
+ *   `/branch create` pipeline host-side (name gate against the registry
+ *   BEFORE forking, official agent-path fork, official rename, record
+ *   write) and returns `{ sessionId }` of the created child. Serves the
+ *   hijacked official fork button.
  *
  * Anything else — unknown endpoints, malformed payloads, missing sessions,
  * thrown port failures — folds into `{ ok: false, error: { code: 'internal',
@@ -166,6 +202,30 @@ export interface BranchRpcPorts {
  */
 export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
   return async (endpoint, payload) => {
+    if (endpoint === 'fork') {
+      // The write endpoint: the hijacked fork button's single round trip.
+      // Everything that can reject a bad request (payload shape, name
+      // validity/uniqueness, source existence) happens before any fork
+      // side effect, and every failure renders through the shared
+      // command-layer message mapping so dialog and /branch read alike.
+      try {
+        const parsed = forkPayloadSchema.safeParse(payload)
+        if (!parsed.success) {
+          const issues = parsed.error.issues
+            .map(issue => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+            .join('; ')
+          return internalError(`invalid "fork" payload: ${issues}`)
+        }
+        const value = await ports.createBranch({
+          name: parsed.data.name,
+          sourceSessionId: parsed.data.sessionId,
+          ...(parsed.data.atSeq === undefined ? {} : { atSeq: parsed.data.atSeq }),
+        })
+        return { ok: true, value }
+      } catch (error) {
+        return internalError(branchErrorMessage(error))
+      }
+    }
     if (endpoint !== 'registry' && endpoint !== 'graph') {
       return internalError(
         `unknown endpoint ${JSON.stringify(endpoint)} on channel ${JSON.stringify(RPC_CHANNEL)}`,
