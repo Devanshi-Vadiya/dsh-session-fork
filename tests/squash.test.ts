@@ -1,0 +1,278 @@
+/**
+ * Tests for the pure squash logic: post-fork region selection with edge
+ * validation, checkpoint extraction, merge provenance, and the error text
+ * mapping — all against fake session objects, no cordis.
+ * @module dsh-session-fork/tests/squash.test
+ */
+
+import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { CompactionId, compactCheckpointSource, isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
+import type { ManualCompactionErrorCode } from '@deepseek-ai/dsh-compaction'
+import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import {
+  buildMergeCheckpoint,
+  extractCheckpointMessage,
+  postForkRange,
+  squashErrorText,
+  SquashCoreError,
+} from '../src/squash.js'
+import type { MergeCheckpointSource } from '../src/squash.js'
+
+/** One raw fake log event; its array index becomes its seq. */
+interface FakeEvent {
+  type: string
+  data?: unknown
+}
+
+/**
+ * Build a structural fake Session over raw events and a surface node list.
+ * `deriveEventMessage` serves `user/message` events from `data.message`;
+ * tool-pairing balance is computed by the real
+ * `toolPairingBalancedBefore/After` imports over these events.
+ */
+function fakeSession(rawEvents: readonly FakeEvent[], surfaceSeqs: readonly number[]): Session {
+  const events = rawEvents.map((raw, seq) => ({ seq, ...raw })) as unknown as SessionEvent[]
+  const deriveEventMessage = (event: SessionEvent): Message | null => {
+    if (event.type !== 'user/message') return null
+    const data = event.data as { message?: Message } | undefined
+    return data?.message ?? null
+  }
+  return {
+    events,
+    surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
+    deriveEventMessage,
+  } as unknown as Session
+}
+
+/** A real checkpoint user message, like the one a compaction replacement lands. */
+function checkpointUserMessage(compactionId: string, text: string): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: compactCheckpointSource(CompactionId(compactionId)),
+  })
+}
+
+/** Run `fn` and return the thrown SquashCoreError code. */
+function codeOf(fn: () => unknown): string {
+  try {
+    fn()
+  } catch (error) {
+    return (error as SquashCoreError).code
+  }
+  throw new Error('expected a throw')
+}
+
+describe('postForkRange', () => {
+  test('selects the surface tail after the seed boundary', () => {
+    const session = fakeSession(
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+        { type: 'user/message' },
+        { type: 'user/message' },
+      ],
+      [0, 2, 3],
+    )
+    expect(postForkRange(session)).toEqual({ start: 2, end: 3 })
+  })
+
+  test('a single post-fork node is a valid region', () => {
+    const session = fakeSession(
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+        { type: 'user/message' },
+      ],
+      [0, 2],
+    )
+    expect(postForkRange(session)).toEqual({ start: 2, end: 2 })
+  })
+
+  test('no seed boundary fails with missing-seed-boundary', () => {
+    const session = fakeSession(
+      [{ type: 'user/message' }, { type: 'user/message' }],
+      [0, 1],
+    )
+    expect(codeOf(() => postForkRange(session))).toBe('missing-seed-boundary')
+  })
+
+  test('nothing after the seed boundary fails with empty-fork-range', () => {
+    const session = fakeSession(
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+      ],
+      [0],
+    )
+    expect(codeOf(() => postForkRange(session))).toBe('empty-fork-range')
+  })
+
+  test('a region start inside an open tool pair fails with unbalanced-range', () => {
+    // The assistant tool-call at seq 0 is still open when the region starts
+    // at seq 3 (its tool/result lands at seq 4, inside the region).
+    const session = fakeSession(
+      [
+        { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call' }] } } },
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+        { type: 'user/message' },
+        { type: 'tool/result' },
+      ],
+      [0, 1, 3, 4],
+    )
+    expect(codeOf(() => postForkRange(session))).toBe('unbalanced-range')
+  })
+
+  test('a region end that opens a tool call fails with unbalanced-range', () => {
+    // The assistant tool-call at seq 2 (the region end) never closes.
+    const session = fakeSession(
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+        { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call' }] } } },
+        { type: 'user/message' },
+      ],
+      [0, 2, 3],
+    )
+    expect(codeOf(() => postForkRange(session))).toBe('unbalanced-range')
+  })
+
+  test('balanced tool pairs inside the region pass both edge checks', () => {
+    // The tool-call at seq 2 closes at seq 3, fully inside the region.
+    const session = fakeSession(
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+        { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call' }] } } },
+        { type: 'tool/result' },
+        { type: 'user/message' },
+      ],
+      [0, 2, 3, 4],
+    )
+    expect(postForkRange(session)).toEqual({ start: 2, end: 4 })
+  })
+})
+
+describe('extractCheckpointMessage', () => {
+  test('returns the newest checkpoint node on the surface', () => {
+    const stale = checkpointUserMessage('old-compaction', 'older summary')
+    const fresh = checkpointUserMessage('new-compaction', 'fresh summary')
+    const session = fakeSession(
+      [
+        { type: 'user/message', data: { message: stale } },
+        { type: 'session/end-seed' },
+        { type: 'user/message', data: { message: fresh } },
+      ],
+      [0, 2],
+    )
+    expect(extractCheckpointMessage(session)).toBe(fresh)
+  })
+
+  test('skips non-checkpoint nodes and non-message events', () => {
+    const fresh = checkpointUserMessage('new-compaction', 'fresh summary')
+    const plain = createUserMessage({
+      content: [{ type: 'text', text: 'ordinary' }],
+      source: { kind: 'user' },
+    })
+    const session = fakeSession(
+      [
+        { type: 'user/message', data: { message: plain } },
+        { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'assistant' }] } } },
+        { type: 'session/end-seed' },
+        { type: 'user/message', data: { message: fresh } },
+      ],
+      [0, 1, 3],
+    )
+    expect(extractCheckpointMessage(session)).toBe(fresh)
+  })
+
+  test('no checkpoint fails with checkpoint-not-found', () => {
+    const plain = createUserMessage({
+      content: [{ type: 'text', text: 'ordinary' }],
+      source: { kind: 'user' },
+    })
+    const session = fakeSession(
+      [
+        { type: 'user/message', data: { message: plain } },
+        { type: 'session/end-seed' },
+      ],
+      [0],
+    )
+    expect(codeOf(() => extractCheckpointMessage(session))).toBe('checkpoint-not-found')
+  })
+})
+
+describe('buildMergeCheckpoint', () => {
+  const checkpoint = checkpointUserMessage('child-compaction', 'the conclusion')
+
+  test('keeps the checkpoint content and stays a recognized compaction checkpoint', () => {
+    const merged = buildMergeCheckpoint(checkpoint, {
+      childSessionId: 'session-child' as Session['id'],
+      atSeq: 41,
+      shadowedRange: { start: 3, end: 9 },
+      shadowedSeqs: [3, 4, 9],
+      compactionId: CompactionId('child-compaction'),
+    })
+    expect(merged.role).toBe('user')
+    expect(merged.content).toEqual(checkpoint.content)
+    expect(isCompactCheckpointSource(merged.source)).toBe(true)
+    const source = merged.source as MergeCheckpointSource
+    expect(source.kind).toBe('plugin')
+    expect(source.plugin).toBe('compact')
+    expect(source.childSessionId).toBe('session-child')
+    expect(source.atSeq).toBe(41)
+    expect(source.shadowedRange).toEqual({ start: 3, end: 9 })
+    expect(source.shadowedSeqs).toEqual([3, 4, 9])
+    expect(source.compactionId).toBe(CompactionId('child-compaction'))
+    expect('sourceCommandId' in source).toBe(false)
+  })
+
+  test('records the initiating command id when present', () => {
+    const merged = buildMergeCheckpoint(checkpoint, {
+      childSessionId: 'session-child' as Session['id'],
+      atSeq: 41,
+      shadowedRange: { start: 3, end: 9 },
+      shadowedSeqs: [3, 4, 9],
+      compactionId: CompactionId('child-compaction'),
+      sourceCommandId: 'cmd-7' as CommandId,
+    })
+    const source = merged.source as MergeCheckpointSource
+    expect(source.sourceCommandId).toBe('cmd-7')
+    expect(isCompactCheckpointSource(merged.source)).toBe(true)
+  })
+})
+
+describe('squashErrorText', () => {
+  test('maps every ManualCompactionErrorCode to the mirrored wording', () => {
+    expect(squashErrorText('busy')).toBe(
+      'Squash is unavailable because this process has an active compaction, or the agent is not idle.',
+    )
+    expect(squashErrorText('cancelled')).toBe('Squash cancelled.')
+    expect(squashErrorText('changed')).toBe(
+      'The history selected for squash changed before it could be replaced. The conversation is unchanged; the attempt is recorded in the session log.',
+    )
+    expect(squashErrorText('summary')).toBe(
+      'Squash could not produce a useful summary. The conversation is unchanged; the attempt is recorded in the session log.',
+    )
+    expect(squashErrorText('commit')).toBe(
+      'Squash did not finish cleanly; some session history may have changed. Inspect the current session state before retrying.',
+    )
+    expect(squashErrorText('persistence')).toBe('Squash finished, but the session could not be saved.')
+  })
+
+  test('covers the whole closed union', () => {
+    const codes: ManualCompactionErrorCode[] = ['busy', 'cancelled', 'changed', 'summary', 'commit', 'persistence']
+    for (const code of codes) {
+      expect(squashErrorText(code).length).toBeGreaterThan(0)
+    }
+  })
+
+  test('the summary wording carries the v0.1.x rebase-hint TODO', () => {
+    const source = readFileSync(new URL('../src/squash.ts', import.meta.url), 'utf8')
+    expect(source).toContain('TODO(v0.1.x)')
+  })
+})

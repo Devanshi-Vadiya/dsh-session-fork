@@ -15,6 +15,11 @@
  * it is publicly exported by @deepseek-ai/dsh-agent-presets and imported
  * directly (optional peer dependency) — direct import beats copying.
  *
+ * `getOrResumeAgent` at the end of this file is a later addition carrying its
+ * own VENDORED FROM header (deepseek-harness@528c682e…, api-proxy.ts:1078 +
+ * 1569-1659): the checkout advanced past 99f6f02f before that kernel was
+ * copied.
+ *
  * Vendor policy (dsh-session-fork vendor-replication standard): every deviation
  * from upstream carries exactly one marker —
  * - `[fork:adapt]`   mechanical adaptation, no semantic change (injected
@@ -26,6 +31,13 @@
  */
 
 import type { SourceEvent } from '../branch.js'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+// Type-only presence import: pulls in this package's Context augmentation
+// (`ctx.sessionPersistence`) without any runtime dependency on it.
+import type {} from '@deepseek-ai/dsh-session-persistence'
 
 /** Header fields the vendored helpers consume. */
 export interface VendoredSourceHeader {
@@ -247,4 +259,175 @@ export function anchoredBoundaryOf(
   for (const index of firstOpenAt.values()) earliestOrphan = Math.min(earliestOrphan, index)
   if (Number.isFinite(earliestOrphan)) cut = earliestOrphan
   return { boundarySeq: boundary.seq, cut }
+}
+
+// ---------------------------------------------------------------------------
+// getOrResumeAgent — the api-proxy ensureSession kernel
+//
+// VENDORED FROM: deepseek-harness@528c682e061696f5a160f363f236ecbf53cbd006
+// (copied 2026-08-21)
+//
+// - packages/host/apiproxy/src/api-proxy.ts:1078 — the `sessionCreations`
+//   memo: client-chosen identity creation/resume, deduplicated across
+//   concurrent retries.
+// - packages/host/apiproxy/src/api-proxy.ts:1569-1659 — `ensureSession`:
+//   live-first lookup, full-composition persisted resume, and the
+//   concurrent-publication recovery catch.
+//
+// The three helpers above were vendored while this checkout sat at 99f6f02f
+// and keep that historical citation; this kernel was copied after the
+// checkout advanced to 528c682e, which shifted api-proxy line numbers
+// without changing ensureSession's semantics.
+// ---------------------------------------------------------------------------
+
+/** Live-first session state the resume kernel needs (header + event log). */
+export interface ReadSessionState {
+  readonly header: SessionHeader
+  readonly events: readonly SessionEvent[]
+}
+
+/** What the kernel contributes to a resume: the identity and the composed setup. */
+export interface ResumeRequest {
+  readonly resumeSessionId: Session['id']
+  readonly setup: (agentCtx: unknown) => Promise<void>
+}
+
+// [fork:adapt] injection seam. Upstream ensureSession closes over the
+// api-proxy constructor's ctx services (sessions / agents /
+// sessionPersistence / agentPresets / agentDefaultModel) and over the
+// closure-level `sessionCreations` memo; the vendor copy receives an
+// injectable deps object instead, and keeps one creation memo per deps
+// instance — a module-level WeakMap with the same lifetime semantics as the
+// upstream closure (one entry per production wiring, isolated per injected
+// test deps).
+export interface GetOrResumeDeps {
+  /** `ctx.agents.get` — the live-agent lookup. */
+  get(sessionId: Session['id']): Agent | undefined
+  /** `ctx.agents.resume` with the caller's default model selection pre-bound. */
+  resume(request: ResumeRequest): Promise<{ agent: Agent }>
+  /** Live-first state read (`ctx.sessions.get`, else persistence inspect); `null` = not found. */
+  readState(sessionId: Session['id']): Promise<ReadSessionState | null>
+  /** The stored preset's composition via the vendored {@link composeAgent}. */
+  composeSetup(presetId: string | undefined): Promise<AgentComposition>
+}
+
+/** One session-creation memo per injected deps instance (see the [fork:adapt] note above). */
+const creationsByDeps = new WeakMap<GetOrResumeDeps, Map<Session['id'], Promise<Agent>>>()
+
+/** Structural slice of `ctx.get('agentDefaultModel')` relied on. */
+export interface AgentDefaultModelLike {
+  currentSelection(): { provider: string; model: string }
+}
+
+/**
+ * Get the live agent for a session id, or cold-resume it from its persisted
+ * log — the parent-side write entry for /squash.
+ *
+ * Mirrors the api-proxy ensureSession kernel: live lookup first, then one
+ * memoized full-composition resume shared by concurrent callers, with a
+ * recovery catch that returns an agent published by a competing path
+ * instead of surfacing the registry's `already registered`.
+ * @param deps - injected session/agent capabilities (default wiring: {@link getOrResumeDeps}).
+ * @param sessionId - the persisted session to obtain a live agent for.
+ * @returns the live agent.
+ * @throws when the session does not exist — this kernel never creates one.
+ */
+export async function getOrResumeAgent(
+  deps: GetOrResumeDeps,
+  sessionId: Session['id'],
+): Promise<Agent> {
+  const creations = creationsByDeps.get(deps) ?? (() => {
+    const fresh = new Map<Session['id'], Promise<Agent>>()
+    creationsByDeps.set(deps, fresh)
+    return fresh
+  })()
+  let creation = creations.get(sessionId)
+  if (creation === undefined) {
+    creation = (async () => {
+      // [fork:adapt] web RPC admission logic deliberately not vendored: the
+      // subagent-ownership checks, the cwd-conflict validation, the
+      // preset-unchanged assertions, and the whole post-await guard block
+      // are request-entry guards for the remote session wire; an
+      // in-process caller has already resolved the workspace scope, and the
+      // parent is resumed exactly as its log records, so none of them
+      // applies.
+      const live = deps.get(sessionId)
+      if (live !== undefined) return live
+      const stored = await deps.readState(sessionId)
+      // [fork:surgery] create branch deleted. Upstream ensureSession falls
+      // through to mkdir + ctx.agents.create when nothing persists; a squash
+      // parent must ALREADY exist — fabricating a fresh session would
+      // silently write the conclusion into a brand-new empty branch instead
+      // of the real parent — so the vendor copy throws when readState
+      // reports the session missing, and there is no create path at all.
+      if (stored === null) {
+        throw new Error(
+          `getOrResumeAgent: session "${sessionId}" not found — a squash parent must already exist`,
+        )
+      }
+      const storedPreset = resolveSessionPreset(stored)
+      return (await deps.resume({
+        resumeSessionId: sessionId,
+        setup: (await deps.composeSetup(storedPreset)).setup,
+      })).agent
+    })().catch((error: unknown) => {
+      // Another Host entry path may have published the same identity while
+      // this operation crossed an asynchronous persistence step.
+      const live = deps.get(sessionId)
+      if (live !== undefined) return live
+      throw error
+    }).finally(() => {
+      creations.delete(sessionId)
+    })
+    creations.set(sessionId, creation)
+  }
+  return await creation
+}
+
+/**
+ * Default production wiring for {@link getOrResumeAgent}: the api-proxy
+ * closures the vendored kernel captures upstream, rebuilt over one cordis
+ * context. `resume` pre-binds the host default model selection as
+ * agentOptions, `readState` reads live-first (sessions store, else
+ * persistence inspect — the same pattern as the /branch fork path), and
+ * `composeSetup` resolves the recorded preset through the vendored
+ * composeAgent.
+ * @param ctx - host context providing agents/sessions/sessionPersistence and optional agentPresets/agentDefaultModel.
+ * @returns deps bound to the context services.
+ */
+export function getOrResumeDeps(ctx: Context): GetOrResumeDeps {
+  const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+  return {
+    get: sessionId => ctx.agents.get(sessionId),
+    resume: async (request) => {
+      const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
+      return ctx.agents.resume({
+        resumeSessionId: request.resumeSessionId,
+        ...(defaultModel === undefined ? {} : { agentOptions: defaultModel.currentSelection() }),
+        setup: request.setup,
+      })
+    },
+    readState: async (sessionId) => {
+      const live = ctx.sessions.get(sessionId)
+      if (live !== undefined) {
+        return { header: live.header, events: [...live.events] }
+      }
+      try {
+        const inspected = await ctx.sessionPersistence.inspect(sessionId)
+        return { header: inspected.meta, events: [...inspected.events] }
+      } catch {
+        return null
+      }
+    },
+    composeSetup: (presetId) => composeAgent(
+      {
+        presets,
+        // The plugin seeds the default model through the resume call's
+        // agentOptions (the same pattern as the /branch fork path), so the
+        // vendored composeAgent receives a no-op installer here.
+        installSelection: () => { },
+      },
+      presetId,
+    ),
+  }
 }
