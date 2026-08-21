@@ -18,6 +18,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // owning package) must be in the program for the register call to type.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { BranchGraphView, type BranchGraphInjected } from './BranchGraphView.tsx'
+import { installForkIntercept } from './fork-intercept.js'
 import {
   RPC_CHANNEL,
   type GraphPayloadDto,
@@ -42,8 +43,8 @@ interface ConnectionLike {
   }
 }
 
-/** Required services: the slot system, the locale service, and the wire. */
-export const inject = ['slots', 'locale', 'connection'] as const
+/** Required services: the slot system, the locale service, the wire, and the shared sessions service. */
+export const inject = ['slots', 'locale', 'connection', 'sessions'] as const
 
 /** A connection-less host still renders the tab, in its error state. */
 function graphUnavailable(): GraphRpcResult<never> {
@@ -61,6 +62,10 @@ function graphUnavailable(): GraphRpcResult<never> {
  * @param ctx - client root context.
  */
 export function apply(ctx: Context): void {
+  // Issue #3 stage 1: transparent pass-through interception of the official
+  // fork entries (sidebar row menu + turn-tail branch button). The dialog
+  // and the host-side fork pipeline land in the following commits.
+  installForkIntercept(ctx as unknown as Parameters<typeof installForkIntercept>[0])
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-session-fork: dictionaries')
   const t = ctx.locale.bind(NS)
   const connection = ctx.get('connection') as ConnectionLike | undefined
