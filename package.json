@@ -38,8 +38,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "build:client": "tsdown -c tsdown.client.config.ts",
+    "build": "tsc -p tsconfig.json && tsdown -c tsdown.client.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test"
   },
@@ -104,7 +103,6 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "tsdown": "^0.22.2",
-    "typescript": "^5.9.3",
-    "zod": "^4.4.3"
+    "typescript": "^5.9.3"
   }
 }
