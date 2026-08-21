@@ -28,7 +28,7 @@
 
 import { z } from 'zod'
 import { branchErrorMessage } from './command.js'
-import { assembleBranchGraph } from './graph.js'
+import { assembleBranchGraph, extractTurns, summarizeTurnEvents } from './graph.js'
 import type { BranchGraph, BranchLike, GraphNode, GraphNodeRef, GraphSessionLog } from './graph.js'
 import { listBranches } from './registry.js'
 import type { ForkOrigin, RegistryState, SessionExists } from './types.js'
@@ -139,6 +139,17 @@ export interface ForkValue {
   readonly sessionId: string
 }
 
+/** Payload contract of the `turnEvents` endpoint (row expansion, issue #8). */
+const turnEventsPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  turn: z.number().int().nonnegative(),
+})
+
+/** Success value of the `turnEvents` endpoint: the turn's event rows. */
+export interface TurnEventsValue {
+  readonly events: readonly { readonly seq: number; readonly type: string; readonly text: string }[]
+}
+
 /**
  * Capabilities the RPC handler needs. Production wires live ctx reads in
  * index.ts (live-first cwd resolution, domain-store-backed registry loads,
@@ -194,6 +205,12 @@ export interface BranchRpcPorts {
  *   BEFORE forking, official agent-path fork, official rename, record
  *   write) and returns `{ sessionId }` of the created child. Serves the
  *   hijacked official fork button.
+ * - `turnEvents` — payload `{ sessionId, turn }` (issue #8 row expansion);
+ *   locates the turn through {@link extractTurns} and returns
+ *   `{ events: [{ seq, type, text }] }` — every event of the turn's
+ *   `startSeq..endSeq` span (tool calls included), each with a one-line
+ *   summary text ({@link summarizeTurnEvents}). Unknown session, unknown
+ *   turn, or a synthetic (row-less) turn folds into a readable error.
  *
  * Anything else — unknown endpoints, malformed payloads, missing sessions,
  * thrown port failures — folds into `{ ok: false, error: { code: 'internal',
@@ -224,6 +241,43 @@ export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
         return { ok: true, value }
       } catch (error) {
         return internalError(branchErrorMessage(error))
+      }
+    }
+    if (endpoint === 'turnEvents') {
+      // Row expansion (issue #8): the full event list of one turn — the
+      // graph's own rows are human-prompt turns only, so a turn that has
+      // no row (synthetic injections) is as absent as an unknown session.
+      try {
+        const parsed = turnEventsPayloadSchema.safeParse(payload)
+        if (!parsed.success) {
+          const issues = parsed.error.issues
+            .map(issue => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+            .join('; ')
+          return internalError(`invalid "turnEvents" payload: ${issues}`)
+        }
+        const log = await ports.readSession(parsed.data.sessionId)
+        if (log === null) {
+          return internalError(`no session named ${JSON.stringify(parsed.data.sessionId)} exists`)
+        }
+        const slice = extractTurns(log.events)
+          .find(turn => turn.turn === parsed.data.turn)
+        if (slice === undefined) {
+          return internalError(
+            `session ${JSON.stringify(parsed.data.sessionId)} has no turn ${parsed.data.turn} on the branch graph`,
+          )
+        }
+        // extractTurns only returns closed turns; guard for future shapes.
+        if (slice.endSeq === null) {
+          return internalError(
+            `turn ${parsed.data.turn} of session ${JSON.stringify(parsed.data.sessionId)} is still open`,
+          )
+        }
+        const value: TurnEventsValue = {
+          events: summarizeTurnEvents(log.events, slice.startSeq, slice.endSeq),
+        }
+        return { ok: true, value }
+      } catch (error) {
+        return internalError(error)
       }
     }
     if (endpoint !== 'registry' && endpoint !== 'graph') {

@@ -171,6 +171,8 @@ describe('extractTurns', () => {
 function canonicalWorkspace(): {
   readonly branches: readonly BranchLike[]
   readonly logs: ReadonlyMap<string, GraphSessionLog>
+  readonly rootEvents: readonly GraphEvent[]
+  readonly childEvents: readonly GraphEvent[]
 } {
   const rootEvents = sessionEvents([
     { turn: 1, subject: 'first prompt', time: 10 },
@@ -199,6 +201,8 @@ function canonicalWorkspace(): {
       },
     ],
     logs,
+    rootEvents,
+    childEvents,
   }
 }
 
@@ -216,7 +220,7 @@ function readerOf(logs: ReadonlyMap<string, GraphSessionLog>) {
 
 describe('assembleBranchGraph', () => {
   test('assembles lineage, refs, head, and newest-first order', async () => {
-    const { branches, logs } = canonicalWorkspace()
+    const { branches, logs, rootEvents, childEvents } = canonicalWorkspace()
     const graph = await assembleBranchGraph(branches, 's-child', readerOf(logs).readSession)
     expect(graph.nodes.map(node => node.id)).toEqual([
       's-child:4',
@@ -237,6 +241,18 @@ describe('assembleBranchGraph', () => {
     // Quiet turns carry no refs key at all.
     expect('refs' in (byId.get('s-child:3') ?? {})).toBe(false)
     expect(graph.head).toBe('s-child:4')
+    // Row→data-plane address (issue #8): owning session, turn handle, and
+    // the closing turn/end seq in that session's log (fork atSeq semantic).
+    expect(byId.get('s-child:3')).toMatchObject({
+      sessionId: 's-child',
+      turn: 3,
+      endSeq: endSeqOf(childEvents, 3),
+    })
+    expect(byId.get('s-root:1')).toMatchObject({
+      sessionId: 's-root',
+      turn: 1,
+      endSeq: endSeqOf(rootEvents, 1),
+    })
   })
 
   test('degrades by omission when a branch session is unreadable', async () => {
@@ -408,5 +424,130 @@ describe('rpc handler graph endpoint (end-to-end over fake ports)', () => {
     const handler = createBranchRpcHandler(handlerPorts({ state: { branches: {} }, logs }))
     const result = await handler('graph', { sessionId: 's-root' })
     expect(result).toEqual({ ok: true, value: { nodes: [], head: null } })
+  })
+})
+
+describe('rpc handler turnEvents endpoint (row expansion)', () => {
+  function handlerPorts(options: {
+    readonly state?: RegistryState
+    readonly logs: ReadonlyMap<string, GraphSessionLog>
+  }): BranchRpcPorts {
+    return {
+      async resolveWorkspaceKey() {
+        return options.logs.size > 0 ? '/work' : null
+      },
+      async loadRegistry() {
+        return options.state ?? { branches: {} }
+      },
+      readSession: async (sessionId) => options.logs.get(sessionId) ?? null,
+      sessionExists: () => true,
+    }
+  }
+
+  /** A rich turn: human prompt, assistant text, a tool call, plain markers. */
+  function richSessionEvents(): GraphEvent[] {
+    return [
+      { seq: 0, type: 'turn/start', time: 1, data: { turn: 7 } },
+      {
+        seq: 1, type: 'user/message', time: 1,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'list the files' }],
+          source: { kind: 'user' },
+        },
+      },
+      { seq: 2, type: 'step/start', time: 2, data: { turn: 7, step: 1 } },
+      {
+        seq: 3, type: 'tool/call', time: 2,
+        data: { turn: 7, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls -la"}' },
+      },
+      {
+        seq: 4, type: 'tool/result', time: 3,
+        data: { turn: 7, step: 1, callId: 'c1', content: [] },
+      },
+      {
+        seq: 5, type: 'assistant/message', time: 4,
+        data: {
+          turn: 7, step: 1,
+          message: { role: 'assistant', content: [{ type: 'text', text: 'here is the listing' }] },
+        },
+      },
+      { seq: 6, type: 'step/end', time: 5, data: { turn: 7, step: 1 } },
+      { seq: 7, type: 'turn/end', time: 5, data: { turn: 7, reason: { kind: 'completed' } } },
+    ]
+  }
+
+  test('serves every event of the turn span with one-line summaries', async () => {
+    const logs = new Map([['s-rich', { header: {}, events: richSessionEvents() }]])
+    const handler = createBranchRpcHandler(handlerPorts({ logs }))
+    const result = await handler('turnEvents', { sessionId: 's-rich', turn: 7 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.events).toEqual([
+      { seq: 0, type: 'turn/start', text: 'turn/start' },
+      { seq: 1, type: 'user/message', text: 'list the files' },
+      { seq: 2, type: 'step/start', text: 'step/start' },
+      { seq: 3, type: 'tool/call', text: 'tool bash: {"command":"ls -la"}' },
+      { seq: 4, type: 'tool/result', text: 'tool/result' },
+      { seq: 5, type: 'assistant/message', text: 'here is the listing' },
+      { seq: 6, type: 'step/end', text: 'step/end' },
+      { seq: 7, type: 'turn/end', text: 'turn/end' },
+    ])
+  })
+
+  test('long texts are cut and marked as truncated', async () => {
+    const long = 'x'.repeat(300)
+    const events = [
+      { seq: 0, type: 'turn/start', time: 1, data: { turn: 1 } },
+      {
+        seq: 1, type: 'user/message', time: 1,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: long }],
+          source: { kind: 'user' },
+        },
+      },
+      { seq: 2, type: 'turn/end', time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    const logs = new Map([['s-long', { header: {}, events }]])
+    const handler = createBranchRpcHandler(handlerPorts({ logs }))
+    const result = await handler('turnEvents', { sessionId: 's-long', turn: 1 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const text = result.value.events[1]?.text ?? ''
+    expect(text.length).toBeLessThan(140)
+    expect(text.startsWith('x'.repeat(100))).toBe(true)
+    expect(text.endsWith('…(truncated)')).toBe(true)
+  })
+
+  test('a synthetic (row-less) or unknown turn yields a readable error', async () => {
+    const logs = new Map([['s-rich', { header: {}, events: richSessionEvents() }]])
+    const handler = createBranchRpcHandler(handlerPorts({ logs }))
+    const result = await handler('turnEvents', { sessionId: 's-rich', turn: 99 })
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'session "s-rich" has no turn 99 on the branch graph',
+        details: {},
+      },
+    })
+  })
+
+  test('an unknown session yields a readable error', async () => {
+    const handler = createBranchRpcHandler(handlerPorts({ logs: new Map() }))
+    const result = await handler('turnEvents', { sessionId: 's-ghost', turn: 1 })
+    expect(result).toEqual({
+      ok: false,
+      error: { code: 'internal', message: 'no session named "s-ghost" exists', details: {} },
+    })
+  })
+
+  test('a malformed payload is rejected by the schema', async () => {
+    const handler = createBranchRpcHandler(handlerPorts({ logs: new Map() }))
+    const result = await handler('turnEvents', { sessionId: 's', turn: -1 })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error.message).toContain('invalid "turnEvents" payload')
   })
 })

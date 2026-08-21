@@ -31,6 +31,15 @@ export interface GraphNodeDto {
   readonly parentIds: readonly string[]
   readonly subject: string
   readonly refs?: readonly { readonly id: string; readonly name: string }[] | undefined
+  /** Owning session (mirror of the host's `GraphNode.sessionId`). */
+  readonly sessionId?: string | undefined
+  /** Turn handle of the row (mirror of the host's `GraphNode.turn`). */
+  readonly turn?: number | undefined
+  /**
+   * Closing `turn/end` seq in the owning session's log — the `atSeq` the
+   * right-click "fork from here" action sends (host's `GraphNode.endSeq`).
+   */
+  readonly endSeq?: number | undefined
 }
 
 /** Wire shape of the `graph` endpoint value. */

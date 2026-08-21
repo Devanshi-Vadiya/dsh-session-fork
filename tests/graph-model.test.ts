@@ -36,6 +36,14 @@ describe('toGraphHistoryModel', () => {
     expect(model.headRef).toBeUndefined()
   })
 
+  test('issue-#8 row metadata (sessionId/turn/endSeq) rides the DTO without changing items', () => {
+    const model = toGraphHistoryModel({
+      nodes: [{ id: 's-a:2', parentIds: [], subject: 's', sessionId: 's-a', turn: 2, endSeq: 5 }],
+      head: 's-a:2',
+    })
+    expect(model.items).toEqual([{ id: 's-a:2', parentIds: [], subject: 's', message: 's' }])
+  })
+
   test('empty refs stay absent from the item shape', () => {
     const model = toGraphHistoryModel({
       nodes: [{ id: 'n', parentIds: [], subject: 's', refs: [] }],
