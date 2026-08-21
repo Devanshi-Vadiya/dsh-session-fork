@@ -73,6 +73,12 @@ body[data-ds-dark-theme] .graph {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  /* Match the official session-list row typography (ui-workspace
+   * rows/Rows.module.css): same inherited family at 14px/20px. The size
+   * was previously unset and inherited the 16px body default, crowding
+   * the 22px lane row. */
+  font-size: 14px;
+  line-height: 20px;
 }
 
 /* Full-text tooltip on hover: fades in over the ellipsized label. */

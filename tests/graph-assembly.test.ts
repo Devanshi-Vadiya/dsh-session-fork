@@ -77,18 +77,29 @@ describe('extractTurns', () => {
     ])
   })
 
-  test('falls back to any user message and yields empty subjects for quiet turns', () => {
+  test('synthetic-only and quiet turns yield no rows (human prompts are the only commits)', () => {
     const events = [
       { seq: 0, type: 'turn/start', time: 1, data: { turn: 1 } },
       {
         seq: 1, type: 'user/message', time: 1,
+        data: { role: 'user', content: [{ type: 'text', text: '<goal_round>…' }], source: { kind: 'goal' } },
+      },
+      {
+        seq: 2, type: 'user/message', time: 1,
         data: { role: 'user', content: [{ type: 'text', text: 'injected' }], source: { kind: 'plugin' } },
       },
-      { seq: 2, type: 'turn/end', time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
-      { seq: 3, type: 'turn/start', time: 3, data: { turn: 2 } },
-      { seq: 4, type: 'turn/end', time: 4, data: { turn: 2, reason: { kind: 'completed' } } },
+      { seq: 3, type: 'turn/end', time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+      { seq: 4, type: 'turn/start', time: 3, data: { turn: 2 } },
+      { seq: 5, type: 'turn/end', time: 4, data: { turn: 2, reason: { kind: 'completed' } } },
+      { seq: 6, type: 'turn/start', time: 5, data: { turn: 3 } },
+      {
+        seq: 7, type: 'user/message', time: 5,
+        data: { role: 'user', content: [{ type: 'text', text: 'real question' }], source: { kind: 'user' } },
+      },
+      { seq: 8, type: 'turn/end', time: 6, data: { turn: 3, reason: { kind: 'completed' } } },
     ]
-    expect(extractTurns(events).map(turn => turn.subject)).toEqual(['injected', ''])
+    expect(extractTurns(events).map(turn => [turn.turn, turn.subject]))
+      .toEqual([[3, 'real question']])
   })
 
   test('a fromSeq cutoff (seed boundary) keeps only the session\'s own turns', () => {
@@ -100,7 +111,7 @@ describe('extractTurns', () => {
 
   test('user messages outside any open turn are ignored', () => {
     // A pre-turn orphan (queued or replay residue) must not leak into the
-    // next turn's subject — not even as the fallback.
+    // next turn's subject; the message-less turn yields no row at all.
     const events = [
       {
         seq: 0, type: 'user/message', time: 1,
@@ -109,9 +120,7 @@ describe('extractTurns', () => {
       { seq: 1, type: 'turn/start', time: 2, data: { turn: 1 } },
       { seq: 2, type: 'turn/end', time: 3, data: { turn: 1, reason: { kind: 'completed' } } },
     ]
-    const turns = extractTurns(events)
-    expect(turns).toHaveLength(1)
-    expect(turns[0]!.subject).toBe('')
+    expect(extractTurns(events)).toEqual([])
   })
 
   test('ignores null-turn brackets and never-opened trailing turns', () => {
