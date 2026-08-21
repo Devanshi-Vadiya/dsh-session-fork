@@ -142,3 +142,21 @@ describe('vendored session-title limit integrity', () => {
     expect(source).toMatch(/export const upstreamMaxTitleBytes = 80\n/)
   })
 })
+
+describe('vendored compact engine marker integrity', () => {
+  const source = readFileSync(new URL('../src/vendor/compact.ts', import.meta.url), 'utf8')
+  const markers = (kind: string): number =>
+    source.match(new RegExp(`^\\s*// \\[fork:${kind}\\]`, 'gm'))?.length ?? 0
+
+  test('records the upstream commit SHA', () => {
+    expect(source).toContain('528c682e061696f5a160f363f236ecbf53cbd006')
+  })
+
+  test('exactly two [fork:surgery] markers (explicit region + full-surface input)', () => {
+    expect(markers('surgery')).toBe(2)
+  })
+
+  test('exactly seven [fork:adapt] markers', () => {
+    expect(markers('adapt')).toBe(7)
+  })
+})
