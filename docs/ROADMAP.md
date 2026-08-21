@@ -135,7 +135,7 @@ Deliverables:
   carried over verbatim.
 - Deviation from the native seam (deliberate): official
   `ctx.compaction.compactRegion` requires an open turn, and command execution has
-  none ("no turn wraps them" — interaction/commands/src/index.ts:283); official
+  none ("no turn wraps them" — interaction/commands/src/index.ts:308); official
   `compactNow` auto-selects its region from the head of the surface, which would
   swallow the inherited prefix. Hence the vendored compactNow shell (surgery:
   explicit region parameter), run idle under the agent's maintenance machinery.
