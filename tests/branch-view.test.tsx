@@ -17,7 +17,12 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Window } from 'happy-dom'
 import { BranchGraphView } from '../src/client/BranchGraphView.tsx'
-import { rowLaneColor, type GraphPayloadDto, type GraphRpcResult } from '../src/client/graph-model.ts'
+import {
+  rowLaneColor,
+  type GraphPayloadDto,
+  type GraphRpcResult,
+  type TurnEventsPayloadDto,
+} from '../src/client/graph-model.ts'
 import { toISCMHistoryItemViewModelArray } from '../src/client/vendor/vscode/scm-history.ts'
 import type { ISCMHistoryItemViewModel } from '../src/client/vendor/vscode/types.ts'
 
@@ -52,14 +57,20 @@ interface Mounted {
 const NO_DANGLING: Promise<GraphRpcResult<readonly string[]>> =
   Promise.resolve({ ok: true, value: [] })
 
+const NO_EVENTS: Promise<GraphRpcResult<TurnEventsPayloadDto>> =
+  Promise.resolve({ ok: true, value: { events: [] } })
+
 function mount(
   loadGraph: ViewProps['loadGraph'],
   loadDangling: ViewProps['loadDangling'] = () => NO_DANGLING,
+  loadTurnEvents: ViewProps['loadTurnEvents'] = () => NO_EVENTS,
 ): Mounted {
   const container = window.document.createElement('div')
   window.document.body.appendChild(container)
   const root = createRoot(container)
-  const props = { sessionId: 's-view', loadGraph, loadDangling, t } as unknown as ViewProps
+  const props = {
+    sessionId: 's-view', loadGraph, loadDangling, loadTurnEvents, t,
+  } as unknown as ViewProps
   act(() => { root.render(<BranchGraphView {...props} />) })
   return { root, container }
 }
@@ -158,6 +169,123 @@ describe('BranchGraphView states', () => {
     expect(mounted.container.querySelectorAll('svg.graph')).toHaveLength(3)
     expect(mounted.container.textContent).not.toContain('#state.dangling')
     await act(async () => { mounted.root.unmount() })
+  })
+})
+
+describe('row expansion (issue #8)', () => {
+  /** Payload whose rows carry the issue-#8 data-plane metadata. */
+  const EXPANDABLE_GRAPH: GraphPayloadDto = {
+    nodes: [
+      {
+        id: 's-a:2', parentIds: ['s-a:1'], subject: 'asked for a listing',
+        sessionId: 's-a', turn: 2, endSeq: 9,
+      },
+      { id: 's-a:1', parentIds: [], subject: 'root turn', sessionId: 's-a', turn: 1, endSeq: 3 },
+    ],
+    head: 's-a:2',
+  }
+  const EVENTS: TurnEventsPayloadDto = {
+    events: [
+      { seq: 4, type: 'turn/start', text: 'turn/start' },
+      { seq: 5, type: 'user/message', text: 'list the files' },
+      { seq: 6, type: 'tool/call', text: 'tool bash: {"command":"ls"}' },
+      { seq: 9, type: 'turn/end', text: 'turn/end' },
+    ],
+  }
+
+  /** The expandable row element (meta-carrying rows are role=button). */
+  function expandableRow(mounted: Mounted, id: string): HTMLElement {
+    const rows = [...mounted.container.querySelectorAll('[role="button"]')]
+    const row = rows.find(element => element.textContent?.includes(
+      EXPANDABLE_GRAPH.nodes.find(node => node.id === id)!.subject))
+    if (row === undefined) throw new Error(`row ${id} not found`)
+    return row as HTMLElement
+  }
+
+  test('clicking a row loads its turn events and renders lightweight lines', async () => {
+    const calls: Array<{ sessionId: string, turn: number }> = []
+    const mounted = mount(
+      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
+      () => NO_DANGLING,
+      (sessionId, turn) => {
+        calls.push({ sessionId, turn })
+        return Promise.resolve({ ok: true, value: EVENTS })
+      },
+    )
+    await flush()
+    await act(async () => { expandableRow(mounted, 's-a:2').click() })
+    await flush()
+    expect(calls).toEqual([{ sessionId: 's-a', turn: 2 }])
+    for (const text of ['list the files', 'tool bash: {"command":"ls"}']) {
+      expect(mounted.container.textContent).toContain(text)
+    }
+    // Type badges ride along, one per event line.
+    const badges = [...mounted.container.querySelectorAll('[data-event-type]')]
+    expect(badges.map(badge => badge.textContent)).toEqual([
+      'turn/start', 'user/message', 'tool/call', 'turn/end',
+    ])
+    // Full summary text is available on hover (title attribute).
+    const toolLine = [...mounted.container.querySelectorAll('[title]')]
+      .find(element => element.getAttribute('title') === 'tool bash: {"command":"ls"}')
+    expect(toolLine).toBeDefined()
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('a second click collapses; the cached events survive without a re-fetch', async () => {
+    let calls = 0
+    const mounted = mount(
+      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
+      () => NO_DANGLING,
+      () => {
+        calls += 1
+        return Promise.resolve({ ok: true, value: EVENTS })
+      },
+    )
+    await flush()
+    const row = expandableRow(mounted, 's-a:2')
+    await act(async () => { row.click() })
+    await flush()
+    expect(calls).toBe(1)
+    await act(async () => { row.click() })
+    await flush()
+    expect(calls).toBe(1)
+    expect(mounted.container.textContent).not.toContain('list the files')
+    // Re-expanding is instant and reuses the cache (still one fetch).
+    await act(async () => { row.click() })
+    await flush()
+    expect(calls).toBe(1)
+    expect(mounted.container.textContent).toContain('list the files')
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('a failing event fetch renders the error line inside the expansion', async () => {
+    const mounted = mount(
+      () => Promise.resolve(resultOf(EXPANDABLE_GRAPH)),
+      () => NO_DANGLING,
+      () => Promise.resolve({ ok: false, error: { code: 'internal', message: 'no turn 2' } }),
+    )
+    await flush()
+    await act(async () => { expandableRow(mounted, 's-a:2').click() })
+    await flush()
+    expect(mounted.container.textContent).toContain('#events.error')
+    expect(mounted.container.textContent).toContain('no turn 2')
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('rows without issue-#8 metadata stay plain (not expandable)', async () => {
+    const mounted = mount(() => Promise.resolve(resultOf(TWO_BRANCH_GRAPH)))
+    await flush()
+    expect(mounted.container.querySelectorAll('[role="button"]')).toHaveLength(0)
+    expect(mounted.container.querySelectorAll('[aria-expanded]')).toHaveLength(0)
+    await act(async () => { mounted.root.unmount() })
+  })
+
+  test('the expansion subtree is indented to the label column (CSS contract)', () => {
+    const source = readFileSync(
+      new URL('../src/client/BranchGraphView.module.css', import.meta.url), 'utf8')
+    expect(source).toContain('.events')
+    expect(source).toContain('text-overflow: ellipsis')
+    expect(source).toContain('.eventType')
   })
 })
 

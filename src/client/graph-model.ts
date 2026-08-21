@@ -48,6 +48,18 @@ export interface GraphPayloadDto {
   readonly head: string | null
 }
 
+/** Wire shape of one event row served by the `turnEvents` endpoint. */
+export interface TurnEventRowDto {
+  readonly seq: number
+  readonly type: string
+  readonly text: string
+}
+
+/** Wire shape of the `turnEvents` endpoint value (row expansion). */
+export interface TurnEventsPayloadDto {
+  readonly events: readonly TurnEventRowDto[]
+}
+
 /** Wire shape of one `registry` endpoint branch row, as the view reads it. */
 export interface RegistryBranchDto {
   readonly name: string

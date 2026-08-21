@@ -20,7 +20,14 @@ import { useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconBranchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { rowLaneColor, toGraphHistoryModel, type GraphPayloadDto, type GraphRpcResult } from './graph-model.ts'
+import {
+  rowLaneColor,
+  toGraphHistoryModel,
+  type GraphPayloadDto,
+  type GraphRpcResult,
+  type TurnEventRowDto,
+  type TurnEventsPayloadDto,
+} from './graph-model.ts'
 import { NS } from './locales.ts'
 import {
   renderSCMHistoryItemGraph,
@@ -36,6 +43,15 @@ export interface BranchGraphInjected {
   loadGraph(signal?: AbortSignal): Promise<GraphRpcResult<GraphPayloadDto>>
   /** Load the workspace's dangling branch names (registry liveness view). */
   loadDangling(signal?: AbortSignal): Promise<GraphRpcResult<readonly string[]>>
+  /**
+   * Load one turn's full event list for row expansion (issue #8): every
+   * event of the turn span, each with a one-line summary text.
+   */
+  loadTurnEvents(
+    sessionId: string,
+    turn: number,
+    signal?: AbortSignal,
+  ): Promise<GraphRpcResult<TurnEventsPayloadDto>>
 }
 
 type ViewProps = ConvViewProps & InjectFace<BranchGraphInjected> & PropsLocale<typeof NS>
@@ -45,9 +61,48 @@ type LoadState =
   | { readonly kind: 'error'; readonly message: string }
   | { readonly kind: 'ready'; readonly rows: readonly ISCMHistoryItemViewModel[] }
 
-/** One graph row: the rendered swimlane SVG plus the turn's label and ref pills. */
-function GraphRow({ viewModel }: { readonly viewModel: ISCMHistoryItemViewModel }) {
+/** Data-plane address of one row (issue #8's GraphNode metadata). */
+interface RowMeta {
+  readonly sessionId: string
+  readonly turn: number
+}
+
+/** Expansion data of one row: cached after the first successful load. */
+type ExpansionData =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'error'; readonly message: string }
+  | { readonly kind: 'ready'; readonly events: readonly TurnEventRowDto[] }
+
+/** Badge class of one event type: user/assistant/tool/other. */
+function eventKindClass(type: string): string {
+  if (type.startsWith('user')) return css.eventUser
+  if (type.startsWith('assistant')) return css.eventAssistant
+  if (type.startsWith('tool')) return css.eventTool
+  return css.eventOther
+}
+
+/**
+ * One graph row: the rendered swimlane SVG plus the turn's label and ref
+ * pills — and, since issue #8, an expandable event subtree: clicking the
+ * row (or its twistie) lazily loads the turn's events through
+ * {@link BranchGraphInjected.loadTurnEvents} and caches them; clicking
+ * again collapses. Loading and failures render as lightweight states.
+ */
+function GraphRow({
+  viewModel,
+  meta,
+  loadTurnEvents,
+  t,
+}: {
+  readonly viewModel: ISCMHistoryItemViewModel
+  readonly meta: RowMeta | undefined
+  readonly loadTurnEvents: ViewProps['loadTurnEvents']
+  readonly t: ViewProps['t']
+}) {
   const container = useRef<HTMLDivElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [data, setData] = useState<ExpansionData>({ kind: 'idle' })
   useEffect(() => {
     const host = container.current
     if (host === null) return
@@ -58,24 +113,79 @@ function GraphRow({ viewModel }: { readonly viewModel: ISCMHistoryItemViewModel 
   // The badge fill: the row's lane color (vscode paints refs with their
   // own swimlane color; the fallback mirrors the renderer's default).
   const badgeColor = asCssVariable(rowLaneColor(viewModel) ?? 'scmGraph.historyItemRefColor')
+  const toggle = (): void => {
+    if (meta === undefined) return
+    if (expanded) {
+      setExpanded(false)
+      return
+    }
+    setExpanded(true)
+    if (data.kind === 'idle') {
+      // First expansion fetches once; the result is cached, so later
+      // expand/collapse cycles are instant and offline.
+      setData({ kind: 'loading' })
+      loadTurnEvents(meta.sessionId, meta.turn).then(
+        (result) => {
+          setData(result.ok
+            ? { kind: 'ready', events: result.value.events }
+            : { kind: 'error', message: result.error.message })
+        },
+        (error: unknown) => {
+          setData({
+            kind: 'error',
+            message: error instanceof Error ? error.message : String(error),
+          })
+        },
+      )
+    }
+  }
   return (
-    <div className={viewModel.kind === 'HEAD' ? `${css.historyItem} ${css.current}` : css.historyItem}>
-      <div className={css.graphContainer} ref={container} />
-      <span className={css.label} data-full={viewModel.historyItem.subject}>
-        {viewModel.historyItem.subject}
-      </span>
-      {references.length > 0 && (
-        <div className={css.labelContainer}>
-          {references.map(ref => (
-            <span
-              key={ref.id}
-              className={css.ref}
-              style={{ backgroundColor: badgeColor }}
-              title={ref.name}
-            >
-              <span className={css.refIcon}><IconBranchOutline16 size={12} /></span>
-              <span className={css.refName}>{ref.name}</span>
-            </span>
+    <div className={css.rowBlock}>
+      <div
+        className={viewModel.kind === 'HEAD' ? `${css.historyItem} ${css.current}` : css.historyItem}
+        onClick={toggle}
+        role={meta === undefined ? undefined : 'button'}
+        aria-expanded={meta === undefined ? undefined : expanded}
+      >
+        <div className={css.graphContainer} ref={container} />
+        {meta !== undefined && (
+          <span className={css.twistie} aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+        )}
+        <span className={css.label} data-full={viewModel.historyItem.subject}>
+          {viewModel.historyItem.subject}
+        </span>
+        {references.length > 0 && (
+          <div className={css.labelContainer}>
+            {references.map(ref => (
+              <span
+                key={ref.id}
+                className={css.ref}
+                style={{ backgroundColor: badgeColor }}
+                title={ref.name}
+              >
+                <span className={css.refIcon}><IconBranchOutline16 size={12} /></span>
+                <span className={css.refName}>{ref.name}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      {expanded && meta !== undefined && (
+        <div className={css.events}>
+          {data.kind === 'loading' && <div className={css.eventState}>{t('events.loading')}</div>}
+          {data.kind === 'error' && (
+            <div className={css.eventState}>
+              {t('events.error')}
+              <span className={css.eventErrorDetail}>{data.message}</span>
+            </div>
+          )}
+          {data.kind === 'ready' && data.events.map(event => (
+            <div key={event.seq} className={css.eventRow}>
+              <span className={`${css.eventType} ${eventKindClass(event.type)}`} data-event-type={event.type}>
+                {event.type}
+              </span>
+              <span className={css.eventText} title={event.text}>{event.text}</span>
+            </div>
           ))}
         </div>
       )}
@@ -84,14 +194,16 @@ function GraphRow({ viewModel }: { readonly viewModel: ISCMHistoryItemViewModel 
 }
 
 /** The branches graph tab body: loads over RPC, then renders the lanes. */
-export function BranchGraphView({ sessionId, loadGraph, loadDangling, t }: ViewProps) {
+export function BranchGraphView({ sessionId, loadGraph, loadDangling, loadTurnEvents, t }: ViewProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' })
+  const [metaById, setMetaById] = useState<ReadonlyMap<string, RowMeta>>(new Map())
   const [dangling, setDangling] = useState<readonly string[]>([])
   const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
     setState({ kind: 'loading' })
+    setMetaById(new Map())
     setDangling([])
     loadGraph(controller.signal).then(
       (result) => {
@@ -101,6 +213,15 @@ export function BranchGraphView({ sessionId, loadGraph, loadDangling, t }: ViewP
           return
         }
         const model = toGraphHistoryModel(result.value)
+        // Row→data-plane addresses for expansion (nodes without the new
+        // issue-#8 metadata simply stay non-expandable).
+        const meta = new Map<string, RowMeta>()
+        for (const node of result.value.nodes) {
+          if (node.sessionId !== undefined && node.turn !== undefined) {
+            meta.set(node.id, { sessionId: node.sessionId, turn: node.turn })
+          }
+        }
+        setMetaById(meta)
         setState({
           kind: 'ready',
           rows: toISCMHistoryItemViewModelArray([...model.items], undefined, model.headRef),
@@ -150,7 +271,15 @@ export function BranchGraphView({ sessionId, loadGraph, loadDangling, t }: ViewP
   }
   return (
     <div className={css.graph}>
-      {state.rows.map(row => <GraphRow key={row.historyItem.id} viewModel={row} />)}
+      {state.rows.map(row => (
+        <GraphRow
+          key={row.historyItem.id}
+          viewModel={row}
+          meta={metaById.get(row.historyItem.id)}
+          loadTurnEvents={loadTurnEvents}
+          t={t}
+        />
+      ))}
       {dangling.length > 0 && (
         <div className={css.danglingSection}>
           {t('state.dangling')}
