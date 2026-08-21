@@ -1,49 +1,191 @@
 /**
- * Tests for the browser-half fork interception seam (stage 1: transparent
- * pass-through patch).
+ * Tests for the browser-half fork interception: the dialog controller's
+ * state machine and the full intercepted flow (dialog → client pre-gate →
+ * host `fork` endpoint → open), with every dsh touchpoint faked.
  * @module dsh-session-fork/tests/client-patch.test
  */
 
 import { describe, expect, test } from 'bun:test'
-import { installForkIntercept, type SessionsServiceLike } from '../src/client/fork-intercept.js'
+import { createForkNameDialog } from '../src/client/fork-name-dialog.tsx'
+import { installForkIntercept } from '../src/client/fork-intercept.js'
+import type {
+  ForkEndpointPayload,
+  ForkEndpointResult,
+  ForkInterceptDeps,
+  SessionsServiceLike,
+} from '../src/client/fork-intercept.js'
 
-/** Fake sessions service recording calls and receiver identity. */
-function fakeSessions(): SessionsServiceLike & {
+/** Fake sessions service recording calls, receiver identity, addressability. */
+function fakeSessions(options: { addressableFrom?: string[] } = {}): SessionsServiceLike & {
+  readonly opened: string[]
   readonly calls: { thisArg: unknown; opts: unknown[] }[]
 } {
+  const opened: string[] = []
   const calls: { thisArg: unknown; opts: unknown[] }[] = []
   const service: SessionsServiceLike = {
     fork(...opts: [{ sessionId: string }]): Promise<string> {
       calls.push({ thisArg: this, opts })
       return Promise.resolve(`child-of-${opts[0]!.sessionId}`)
     },
-    open() { },
+    open(sessionId) {
+      opened.push(sessionId)
+    },
+    binding(sessionId) {
+      return options.addressableFrom?.includes(sessionId) ? { session: sessionId } : undefined
+    },
   }
-  return Object.assign(service, { calls })
+  return Object.assign(service, { opened, calls })
 }
 
-describe('client fork patch (transparent stage)', () => {
-  test('forwards calls verbatim and preserves the official receiver', async () => {
-    const sessions = fakeSessions()
-    const before = sessions.fork
-    installForkIntercept({ get: () => sessions })
+/** Deps harness: scripted dialog + recording wire/gate. */
+function depsHarness(overrides: Partial<ForkInterceptDeps> = {}): {
+  deps: ForkInterceptDeps
+  forkCalls: ForkEndpointPayload[]
+  nextResults: ForkEndpointResult[]
+  waitFor: string[]
+} {
+  const forkCalls: ForkEndpointPayload[] = []
+  const nextResults: ForkEndpointResult[] = [{ ok: true, value: { sessionId: 'child-1' } }]
+  const waitFor: string[] = []
+  const sessions = fakeSessions({ addressableFrom: ['child-1'] })
+  const deps: ForkInterceptDeps = {
+    sessions,
+    requestName: (submit) => submit('review').then(outcome =>
+      outcome.ok ? { sessionId: outcome.sessionId } : undefined),
+    validateName: () => ({ ok: true }),
+    formatInvalidName: (reason) => `Invalid branch name: ${reason}`,
+    callFork: async (payload) => {
+      forkCalls.push(payload)
+      return nextResults.length > 1 ? nextResults.shift()! : nextResults[0]!
+    },
+    waitForSession: async (sessionId) => {
+      waitFor.push(sessionId)
+    },
+    ...overrides,
+  }
+  return { deps, forkCalls, nextResults, waitFor }
+}
 
-    expect(sessions.fork).not.toBe(before) // property was replaced
-    await expect(sessions.fork({ sessionId: 's1', increaseTitle: true }))
-      .resolves.toBe('child-of-s1')
-    expect(sessions.calls).toEqual([
-      { thisArg: sessions, opts: [{ sessionId: 's1', increaseTitle: true }] },
-    ]) // `this` stayed the official service instance
+describe('fork-name dialog controller', () => {
+  test('accept path: submit ok resolves the child id and closes', async () => {
+    const dialog = createForkNameDialog()
+    const request = dialog.requestName(async () => ({ ok: true, sessionId: 'child-9' }))
+    expect(dialog.getSnapshot().phase).toBe('open')
+    dialog.confirm()
+    await expect(request).resolves.toEqual({ sessionId: 'child-9' })
+    expect(dialog.getSnapshot().phase).toBe('closed')
+  })
+
+  test('reject path: a failed submit shows the message and stays open; retry then accept', async () => {
+    const dialog = createForkNameDialog()
+    let attempt = 0
+    const request = dialog.requestName(async () => {
+      attempt += 1
+      return attempt === 1
+        ? { ok: false, message: 'A branch with that name already exists.' }
+        : { ok: true, sessionId: 'child-2' }
+    })
+    dialog.confirm()
+    await Promise.resolve() // let the rejection settle into state
+    expect(dialog.getSnapshot().phase).toBe('open')
+    expect(dialog.getSnapshot().error).toBe('A branch with that name already exists.')
+    dialog.confirm()
+    await expect(request).resolves.toEqual({ sessionId: 'child-2' })
+  })
+
+  test('cancel settles undefined; a confirm landing mid-flight after cancel is dropped', async () => {
+    const dialog = createForkNameDialog()
+    let release!: (outcome: { ok: true; sessionId: string }) => void
+    const request = dialog.requestName(() => new Promise(resolve => {
+      release = resolve
+    }))
+    dialog.confirm() // submission goes in flight; its promise is now pending
+    dialog.cancel() // user cancels while the submission is still flying
+    release({ ok: true, sessionId: 'child-late' }) // late outcome must be dropped
+    await expect(request).resolves.toBeUndefined()
+    expect(dialog.getSnapshot().phase).toBe('closed')
+  })
+
+  test('a second concurrent request settles undefined immediately', async () => {
+    const dialog = createForkNameDialog()
+    void dialog.requestName(() => new Promise(() => {}))
+    await expect(dialog.requestName(() => new Promise(() => {}))).resolves.toBeUndefined()
+  })
+})
+
+describe('intercepted fork flow', () => {
+  test('success: gate passes, wire called once, child awaited then opened, childId returned', async () => {
+    const { deps, forkCalls, waitFor } = depsHarness()
+    installForkIntercept(deps)
+    const result = await deps.sessions.fork({ sessionId: 's1', increaseTitle: true })
+    expect(result).toBe('child-1')
+    expect(forkCalls).toEqual([{ sessionId: 's1', name: 'review' }]) // increaseTitle dropped
+    expect(waitFor).toEqual(['child-1'])
+    expect((deps.sessions as { opened: string[] }).opened).toEqual(['child-1'])
+  })
+
+  test('fractional atSeq floors to an integer on the wire', async () => {
+    const { deps, forkCalls } = depsHarness()
+    installForkIntercept(deps)
+    await deps.sessions.fork({ sessionId: 's1', atSeq: 41.7, increaseTitle: true })
+    expect(forkCalls).toEqual([{ sessionId: 's1', name: 'review', atSeq: 41 }])
+  })
+
+  test('cancel rejects with the cancel error and never touches the wire', async () => {
+    const { deps, forkCalls } = depsHarness({
+      requestName: () => Promise.resolve(undefined),
+    })
+    installForkIntercept(deps)
+    await expect(deps.sessions.fork({ sessionId: 's1' })).rejects.toThrow('fork cancelled')
+    expect(forkCalls).toEqual([])
+    expect((deps.sessions as { opened: string[] }).opened).toEqual([])
+  })
+
+  test('client pre-gate failure surfaces through the dialog bridge without wire traffic', async () => {
+    const seenSubmissions: string[] = []
+    const { deps, forkCalls } = depsHarness({
+      validateName: (name) => name === 'ok-name' ? { ok: true } : { ok: false, reason: 'name must not be empty' },
+      requestName: (submit) =>
+        submit('bad name').then(first => {
+          seenSubmissions.push('first')
+          if (!first.ok) return submit('ok-name').then(second =>
+            second.ok ? { sessionId: second.sessionId } : undefined)
+          return undefined
+        }),
+    })
+    installForkIntercept(deps)
+    await expect(deps.sessions.fork({ sessionId: 's1' })).resolves.toBe('child-1')
+    expect(seenSubmissions).toEqual(['first'])
+    expect(forkCalls).toEqual([{ sessionId: 's1', name: 'ok-name' }]) // only the valid name went out
+  })
+
+  test('host rejection surfaces as the dialog error message and allows a retry', async () => {
+    const results: ForkEndpointResult[] = [
+      { ok: false, error: { code: 'internal', message: 'A branch with that name already exists.' } },
+      { ok: true, value: { sessionId: 'child-3' } },
+    ]
+    const { deps, forkCalls } = depsHarness({
+      callFork: async (payload) => {
+        forkCalls.push(payload)
+        return results.shift()!
+      },
+      requestName: (submit) =>
+        submit('dup').then(first =>
+          first.ok || first.message === '' ? undefined
+            : submit('unique').then(second => second.ok ? { sessionId: second.sessionId } : undefined)),
+    })
+    installForkIntercept(deps)
+    await expect(deps.sessions.fork({ sessionId: 's1' })).resolves.toBe('child-3')
+    expect(forkCalls.map(call => call.name)).toEqual(['dup', 'unique'])
   })
 
   test('re-install (HMR invalidate) does not nest wrappers', async () => {
-    const sessions = fakeSessions()
-    installForkIntercept({ get: () => sessions })
-    const afterFirst = sessions.fork
-    installForkIntercept({ get: () => sessions })
-
-    expect(sessions.fork).toBe(afterFirst) // second install is a no-op
-    await expect(sessions.fork({ sessionId: 's2' })).resolves.toBe('child-of-s2')
-    expect(sessions.calls.length).toBe(1) // exactly one underlying call
+    const { deps, forkCalls } = depsHarness()
+    installForkIntercept(deps)
+    const afterFirst = deps.sessions.fork
+    installForkIntercept(deps)
+    expect(deps.sessions.fork).toBe(afterFirst)
+    await deps.sessions.fork({ sessionId: 's2' })
+    expect(forkCalls.length).toBe(1)
   })
 })
