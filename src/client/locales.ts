@@ -16,8 +16,6 @@ export type ForkLocaleKey =
   | 'state.retry'
   | 'state.empty'
   | 'state.dangling'
-  | 'events.loading'
-  | 'events.error'
   | 'menu.fork'
   | 'menu.squash'
   | 'toast.forked'
@@ -49,8 +47,6 @@ export const zh: Record<ForkLocaleKey, string> = {
   'state.retry': '重试',
   'state.empty': '还没有分支。试试 /branch create <name>',
   'state.dangling': '悬空分支(会话已缺失):',
-  'events.loading': '加载事件…',
-  'events.error': '事件加载失败:',
   'menu.fork': '从此处 Fork',
   'menu.squash': 'Squash 到分支',
   'toast.forked': '已创建分支 ',
@@ -76,8 +72,6 @@ export const en: Record<ForkLocaleKey, string> = {
   'state.retry': 'Retry',
   'state.empty': 'No branches yet. Try /branch create <name>',
   'state.dangling': 'Dangling branches (session missing):',
-  'events.loading': 'Loading events…',
-  'events.error': 'Failed to load events: ',
   'menu.fork': 'Fork from here',
   'menu.squash': 'Squash into branch',
   'toast.forked': 'Forked branch ',

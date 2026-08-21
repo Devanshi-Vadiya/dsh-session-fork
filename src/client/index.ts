@@ -37,7 +37,6 @@ import {
   type GraphPayloadDto,
   type GraphRpcResult,
   type RegistryBranchDto,
-  type TurnEventsPayloadDto,
 } from './graph-model.ts'
 import { en, NS, zh } from './locales.ts'
 
@@ -156,18 +155,6 @@ export function apply(ctx: Context): void {
       // The shared branch-name dialog (same controller the fork
       // interception uses; the overlay renders whichever request is open).
       requestBranchName: dialog.requestName,
-      // Row expansion (issue #8): one turn's full event list, lightweight
-      // `{ seq, type, text }` rows summarized host-side.
-      loadTurnEvents: (
-        rowSessionId: string,
-        turn: number,
-        signal?: AbortSignal,
-      ): Promise<GraphRpcResult<TurnEventsPayloadDto>> => {
-        if (connection === undefined) return Promise.resolve(graphUnavailable())
-        const result: Promise<GraphRpcResult> =
-          connection.rpc.call(RPC_CHANNEL, 'turnEvents', { sessionId: rowSessionId, turn }, signal)
-        return result as Promise<GraphRpcResult<TurnEventsPayloadDto>>
-      },
       // The registry snapshot feeds the dangling-branch section (a branch
       // whose session vanished renders distinctly, not hidden) and the
       // fork-lineage facts that gate the squash menu item (issue #8).
