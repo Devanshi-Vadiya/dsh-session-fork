@@ -10,7 +10,7 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { normalizeSessionTitle, truncateTitleUtf8 } from '@deepseek-ai/dsh-session-title'
+import { validateBranchName } from './branch-name.js'
 import type {
   BranchListing,
   BranchRecord,
@@ -18,7 +18,6 @@ import type {
   RegistryStore,
   SessionExists,
 } from './types.js'
-import { upstreamMaxTitleBytes } from './vendor/session-title-limit.js'
 
 /** Typed failure of one registry operation. */
 export class BranchRegistryError extends Error {
@@ -47,25 +46,13 @@ export class BranchRegistryError extends Error {
  * later rename deterministic — it must accept the title and store exactly
  * this name.
  *
- * The empty check stays ours: the empty string survives normalization as
- * itself, so identity alone would admit it (the official handler rejects
- * it, but the gate must fail fast before any fork side effect).
+ * Validation logic lives in branch-name.ts (shared with the browser
+ * fork-name dialog); this wrapper keeps the registry's throwing contract.
  */
 function assertValidName(name: string): void {
-  if (name.length === 0) {
-    throw new BranchRegistryError('invalid-name', 'name must not be empty')
-  }
-  if (truncateTitleUtf8(name, upstreamMaxTitleBytes) !== name) {
-    throw new BranchRegistryError(
-      'invalid-name',
-      `exceeds ${String(upstreamMaxTitleBytes)} UTF-8 bytes (the official session-title budget)`,
-    )
-  }
-  if (normalizeSessionTitle(name, upstreamMaxTitleBytes) !== name) {
-    throw new BranchRegistryError(
-      'invalid-name',
-      'must not contain leading/trailing or doubled whitespace, control characters, or invisible characters',
-    )
+  const check = validateBranchName(name)
+  if (!check.ok) {
+    throw new BranchRegistryError('invalid-name', check.reason)
   }
 }
 
