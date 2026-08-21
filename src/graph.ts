@@ -58,8 +58,43 @@ export interface TurnSlice {
   readonly endSeq: number | null
   /** `time` of the `turn/start` event, when recorded. */
   readonly startTime?: number
-  /** First human prompt text in the turn; '' when the turn has none. */
+  /**
+   * First human prompt text in the turn; '' when the turn has none. On a
+   * squash row (`squashOf` set) this is the merge checkpoint's summary.
+   */
   readonly subject: string
+  /**
+   * Squash marker: set (to the merged child's session id) on standalone
+   * rows emitted for a `/squash` merge checkpoint — a between-turns
+   * `user/message` whose plugin source carries `childSessionId`
+   * (src/squash.ts `buildMergeCheckpoint`). On such rows `turn` carries
+   * the checkpoint event's seq (there is no kernel turn handle), so node
+   * ids use an `s`-prefixed form to stay collision-free.
+   */
+  readonly squashOf?: string
+}
+
+/** First line of a text, trimmed — the squash row shows the summary head. */
+function firstLine(text: string): string {
+  const line = text.split('\n', 1)[0] ?? ''
+  return line.trim()
+}
+
+/**
+ * The merged child's session id when `data` is a `/squash` merge
+ * checkpoint user message, else null. The checkpoint is the ONE plugin
+ * message that forms a row (user decision, 2026-08-21): its source is the
+ * official compaction-checkpoint shape (`kind: 'plugin'`,
+ * `plugin: 'compact'`) extended by src/squash.ts with `childSessionId` —
+ * that extension is what separates it from dsh's own `/compact`
+ * checkpoints, which stay filtered like every other plugin message.
+ */
+function squashChildSessionId(data: unknown): string | null {
+  if (data === null || typeof data !== 'object') return null
+  const source = (data as { source?: { kind?: unknown; plugin?: unknown; childSessionId?: unknown } }).source
+  if (source === null || typeof source !== 'object') return null
+  if (source.kind !== 'plugin' || source.plugin !== 'compact') return null
+  return typeof source.childSessionId === 'string' ? source.childSessionId : null
 }
 
 /** Text of one user message: its text blocks joined and trimmed. */
@@ -102,7 +137,11 @@ interface OpenTurn {
  * branch). A turn without a human prompt emits NO row at all — synthetic
  * injections (goal rounds, plugin reminders, team messages) are not
  * commits; each session's row chain links across the skipped turns
- * naturally (every row parents the previous emitted row).
+ * naturally (every row parents the previous emitted row). The single
+ * sanctioned exception is the `/squash` merge checkpoint (see
+ * {@link TurnSlice.squashOf}): it lands between turns and emits its own
+ * row so the parent branch shows the squash summary as an ordinary
+ * commit (user decision, 2026-08-21).
  */
 export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSlice[] {
   const turns: TurnSlice[] = []
@@ -146,6 +185,28 @@ export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSl
         if (open !== null && open.subject === '' && isHumanPrompt(data)) {
           const text = userMessageText(data)
           if (text !== '') open.subject = text
+          break
+        }
+        // Between turns, a /squash merge checkpoint is a row of its own —
+        // the one sanctioned plugin message (squash runs as an idle
+        // command, so its checkpoint never sits inside a turn bracket).
+        // Inside an open turn it stays filtered like every other plugin
+        // injection (cannot happen for real squashes today).
+        if (open === null) {
+          const childSessionId = squashChildSessionId(data)
+          if (childSessionId !== null) {
+            const subject = firstLine(userMessageText(data))
+            if (subject !== '') {
+              turns.push({
+                turn: event.seq,
+                startSeq: event.seq,
+                endSeq: event.seq,
+                ...(event.time === undefined ? {} : { startTime: event.time }),
+                subject,
+                squashOf: childSessionId,
+              })
+            }
+          }
         }
         break
       }
@@ -190,11 +251,24 @@ export interface BranchGraph {
 
 const nodeId = (sessionId: string, turn: number): string => `${sessionId}:${turn}`
 
-/** The turn of `log` whose span contains `seq` (a turn/end seq anchors it). */
+/**
+ * Node id of one slice: ordinary turns are `${sessionId}:${turn}`; squash
+ * rows carry the checkpoint's seq (no kernel turn handle), so they take an
+ * `s`-prefixed seq form to stay collision-free with turn numbers.
+ */
+const sliceId = (sessionId: string, slice: TurnSlice): string =>
+  slice.squashOf === undefined ? nodeId(sessionId, slice.turn) : `${sessionId}:s${slice.turn}`
+
+/**
+ * The turn of `log` whose span contains `seq` (a turn/end seq anchors it).
+ * Squash rows never anchor a fork — `atSeq` is the closing `turn/end` of a
+ * human turn, so squash slices are skipped to keep the resolved id valid.
+ */
 function turnContaining(turns: readonly TurnSlice[], seq: number): TurnSlice | null {
   let found: TurnSlice | null = null
   for (const turn of turns) {
     if (turn.startSeq > seq) break
+    if (turn.squashOf !== undefined) continue
     found = turn
   }
   return found
@@ -283,20 +357,20 @@ export async function assembleBranchGraph(
     turns.forEach((turn, index) => {
       const previous = index > 0 ? turns[index - 1] : undefined
       const parentIds: string[] = []
-      if (previous !== undefined) parentIds.push(nodeId(sessionId, previous.turn))
+      if (previous !== undefined) parentIds.push(sliceId(sessionId, previous))
       if (index === 0 && anchorId !== null) parentIds.push(anchorId)
-      const id = nodeId(sessionId, turn.turn)
+      const id = sliceId(sessionId, turn)
       mutableNodes.push({ id, parentIds, subject: turn.subject, refs: [] })
       sortKeys.set(id, { time: turn.startTime ?? 0, sessionIndex, seq: turn.startSeq })
     })
   }
 
-  // Branch-name refs land on each session's latest own turn (branch head).
+  // Branch-name refs land on each session's latest own row (branch head).
   for (const branch of branches) {
     const turns = ownTurns.get(branch.sessionId) ?? []
     const last = turns.at(-1)
     if (last === undefined) continue
-    const node = mutableNodes.find(candidate => candidate.id === nodeId(branch.sessionId, last.turn))
+    const node = mutableNodes.find(candidate => candidate.id === sliceId(branch.sessionId, last))
     node?.refs.push({ id: branch.name, name: branch.name })
   }
 
@@ -319,6 +393,6 @@ export async function assembleBranchGraph(
   const headLast = headTurns.at(-1)
   return {
     nodes: ordered,
-    head: headLast === undefined ? null : nodeId(headSessionId, headLast.turn),
+    head: headLast === undefined ? null : sliceId(headSessionId, headLast),
   }
 }

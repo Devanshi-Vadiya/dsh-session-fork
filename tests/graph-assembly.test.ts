@@ -131,6 +131,40 @@ describe('extractTurns', () => {
     ]
     expect(extractTurns(events)).toEqual([])
   })
+
+  test('a /squash merge checkpoint between turns emits its own row; ordinary /compact checkpoints do not', () => {
+    // The squash checkpoint: official compaction-checkpoint source
+    // (kind plugin / plugin compact) extended with childSessionId — the
+    // one sanctioned plugin row. Its subject is the summary's first line.
+    const events = [
+      ...sessionEvents([{ turn: 1, subject: 'parent prompt', time: 1 }]),
+      {
+        seq: 3, type: 'user/message', time: 2,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'squash summary line\nmore detail' }],
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+        },
+      },
+      // dsh's own /compact checkpoint: same shape WITHOUT childSessionId —
+      // stays filtered like every other plugin message.
+      {
+        seq: 4, type: 'user/message', time: 3,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'plain compaction checkpoint' }],
+          source: { kind: 'plugin', plugin: 'compact', compactionId: 'c2' },
+        },
+      },
+      ...sessionEvents([{ turn: 2, subject: 'later prompt', time: 4 }])
+        .map(event => ({ ...event, seq: event.seq + 5 })),
+    ]
+    expect(extractTurns(events)).toEqual([
+      { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'parent prompt' },
+      { turn: 3, startSeq: 3, endSeq: 3, startTime: 2, subject: 'squash summary line', squashOf: 's-child' },
+      { turn: 2, startSeq: 5, endSeq: 7, startTime: 4, subject: 'later prompt' },
+    ])
+  })
 })
 
 /** The canonical workspace: root session + one forked child. */
@@ -259,6 +293,45 @@ describe('assembleBranchGraph', () => {
     const graph = await assembleBranchGraph([], 's-any', readerOf(new Map()).readSession)
     expect(graph.nodes).toEqual([])
     expect(graph.head).toBeNull()
+  })
+
+  test('a squash row chains on the parent branch like an ordinary commit', async () => {
+    // Root gets a /squash merge checkpoint after its turns (from the child
+    // branch), then another human turn. The squash row parents to the
+    // previous root row and is itself the parent of what follows — an
+    // ordinary single-parent chain, ids s-prefixed by seq.
+    const rootTurns = sessionEvents([
+      { turn: 1, subject: 'first', time: 10 },
+      { turn: 2, subject: 'second', time: 20 },
+    ])
+    const squashSeq = rootTurns.length
+    const later = sessionEvents([{ turn: 3, subject: 'after squash', time: 40 }])
+      .map(event => ({ ...event, seq: event.seq + squashSeq + 1 }))
+    const rootEvents: GraphEvent[] = [
+      ...rootTurns,
+      {
+        seq: squashSeq, type: 'user/message', time: 30,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'exp conclusion' }],
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+        },
+      },
+      ...later,
+    ]
+    const logs = new Map<string, GraphSessionLog>([
+      ['s-root', { header: {}, events: rootEvents }],
+      ['s-child', { header: { seedLength: 0, parentSession: 's-root' }, events: [] }],
+    ])
+    const branches: BranchLike[] = [
+      { name: 'main', sessionId: 's-root', forkOrigin: null },
+      { name: 'exp', sessionId: 's-child', forkOrigin: { parentSessionId: 's-root', atSeq: endSeqOf(rootTurns, 2) } },
+    ]
+    const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
+    const byId = new Map(graph.nodes.map(node => [node.id, node]))
+    expect(byId.get('s-root:s6')?.subject).toBe('exp conclusion')
+    expect(byId.get('s-root:s6')?.parentIds).toEqual(['s-root:2'])
+    expect(byId.get('s-root:3')?.parentIds).toEqual(['s-root:s6'])
   })
 
   test('timestamp-less logs order deterministically by branch order then seq', async () => {
