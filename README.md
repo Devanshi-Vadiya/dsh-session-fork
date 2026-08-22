@@ -1,67 +1,62 @@
 # dsh-session-fork
 
-Git-style conversation branching for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh). dsh already has an anonymous session-fork primitive; dsh-session-fork adds the *git layer* on top: **named branch refs pointing at sessions**. Forking creates a child branch; later milestones will squash a child's conclusions back into the parent so ongoing phases see a clean summary instead of a full review transcript. Scope, milestones, and acceptance boundaries live in [docs/ROADMAP.md](docs/ROADMAP.md).
+English | [简体中文](docs/README.zh.md)
 
-## Features (v0.0.1 — ref layer)
+Agent apps manage conversations as sessions: chats are silos, and memory doesn't carry over. `dsh-session-fork` makes the **branch** the building block of AI conversation management — parallel workflows, continuous and mergeable conversation memory, the foundation for AI team collaboration and AI secretaries. The long-term direction is sub-agent collaboration and branch-scoped long-term memory.
 
-- Named branches that persist across dsh restarts (storage-domain backed, one registry per workspace cwd).
-- `/branch <name>` — fork the current session at its last completed turn and record the ref, including the exact fork anchor in the parent log. Cold (non-live) sources are forked too, with the same agent preset composition and workspace attachment the Web GUI's fork applies.
-- `/branch adopt <name>` — adopt the current session as the workspace's root branch (no fork).
-- `/branch list` — list this workspace's branches; refs whose session was deleted are marked `[dangling]`.
-- `/branch rm <name> --yes` — remove a branch ref (session data is never deleted).
-- `/branch rename <old> <new>` — rename a ref, with duplicate-name guards.
-- Host-side only; zero GUI changes in this milestone.
+This is a plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh); it cannot run standalone.
 
-## Install into a dsh profile
+![branch tab](docs/media/branch_tab.png)
 
-Requires the `web` (or another web-app-based) profile — the plugin needs the `storageDomain`, `sessions`, `sessionPersistence`, `agents`, and `commands` services.
+## Why branches
+
+**Against session-only management**: once a conversation grows long, you're left with two bad choices —
+
+- Start a new session: the project context and working memory are lost;
+- Keep chatting: the context gets polluted.
+
+**Against plain compaction**: compact has no task boundary, so the model tends to preserve what is important yet irrelevant to the task at hand; and as a conversation grows, repeated compaction still ends in pollution and loss.
+
+**The elegance of branches**:
+
+- fork lets tasks proceed in parallel (pair it with git worktree);
+- each branch holds its own memory, and inter-branch operations move conclusions between them: the working branch keeps a focused context, while the main branch stays free of pollution yet still commands the full picture.
+
+## What you get
+
+- **Upgraded native fork** — the official dsh fork action is taken over, so every fork becomes a managed branch;
+- **Inter-branch operations** — squash a branch's **unique** turns and conclusions back into the main branch or any other branch;
+- **Branch visualization** — a vendored VS Code Source Control Graph, the authentic VS Code look.
+
+## Quick start
+
+Install (requires a web-app-based dsh profile):
 
 ```sh
-dsh plugin --profile web add <path-or-npm-package>
+dsh plugin --profile web add <npm-package-or-local-path>
 ```
 
-Prefer a local path (`file:/path/to/dsh-session-fork`) or the npm package. Git dependencies can trip pnpm's `onlyBuiltDependencies` whitelist in profile installs, so `file:` / npm forms are the reliable route. After installing, restart the profile; `/branch help` in any session confirms the plugin loaded.
-
-## Usage
-
-Arguments are typed after the command in the same message — e.g. `/branch review` forks immediately; there is no separate argument prompt. (The command registers an input hint so the Web GUI treats `/branch <args>` as a command, not a normal chat message.)
+Then, in any session:
 
 ```
-/branch review
+/branch adopt main          # name the current session as branch 'main'
+/branch review              # fork a 'review' branch at the last completed turn
+/squash into main           # (on 'review') compress the new turns back into main
 ```
 
-```
-Branch 'review' → session session-3f9c…a1 (forked from session-8b2d…77 at event 42 (turn end)).
-```
+Or switch to the **branch** tab and do the same through the graphical interface.
 
-The anchor `atSeq` is the parent log's anchoring `turn/end` event seq — it locates the exact fork message in the parent session.
+In the branch tab: hover a row to see the full prompt; right-click to **fork from here** or **squash into a branch**. The official fork button is wired to the same pipeline, so every fork lands in the graph.
 
-```
-/branch adopt main
-```
+## Join us
 
-```
-Branch 'main' → session session-8b2d…77 (root branch, adopted the current session).
-```
+What we want to build next:
 
-```
-/branch list
-```
+1. **Sub agents are a natural fit for the branch model.** Introduce rebase, merge, and friends as primitives; let AI drive branch operations and dispatch sub agents onto branches that communicate through inter-branch operations — replacing the traditional mailbox pattern.
+2. **Branch-scoped project memory.** Existing long-term memory models are project-grained, which is a disaster for the branch model: memory leaks across branches and pollutes context. Branch-grained memory management is the road to a more robust model.
 
-```
-Branches:
-  main     session-8b2d…77  (root)
-  review   session-3f9c…a1  (← session-8b2d…77@42)
-  old      session-c4aa…90  (root) [dangling: session missing]
-```
+We take an open stance on AI collaboration: feel free to use AI to contribute code, write commit messages, and draft PRs. But we expect you to own your code — review it yourself, and treat AI as your tool in communication rather than letting it talk to us on your behalf.
 
-```
-/branch rename review phase2-review
-/branch rm old --yes
-```
+## License
 
-Errors (duplicate name, unknown branch, missing source session, no completed turn to fork from) surface as readable messages; nothing crashes the host.
-
-## Status
-
-**v0.0.1 — no GUI yet.** Branch visibility in the Web UI lands in v0.0.2, squash-in v0.0.3 (see [docs/ROADMAP.md](docs/ROADMAP.md)).
+[MIT](LICENSE)
