@@ -9,10 +9,16 @@ jobs:
       id-token: write   # 供 provenance 签名
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true          # fetch real media; without this, LFS files are 131B pointers
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun test
       - run: bun run build        # dual-face: lib/index.js + lib/client.js
+      - name: Configure npm auth  # bun publish reads ~/.npmrc, not the NPM_TOKEN env
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - run: bun publish --access public
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
