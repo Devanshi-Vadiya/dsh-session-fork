@@ -63,7 +63,7 @@ Inter-branch options plus release chores. Closes when the plugin is npm-installa
 
 - merge & rebase between branches — #4 (design note required before implementation)
 - squash between any two branches — #21, with TOOL-message research #22
-- remove branch from the GUI — #23
+- remove branch from the GUI — #23 (shipped: `removeBranch` RPC endpoint + branch-tab entry behind the official RiskConfirmation primitive)
 - README #16 and npm pack #17
 
 ### v0.2.0 — Sub agents in parallel
