@@ -33,7 +33,7 @@ Agent 应用普遍以 session 管理对话:对话彼此割裂,记忆难以延续
 安装(需要基于 web 应用的 dsh profile):
 
 ```sh
-dsh plugin --profile web add <npm-package-or-local-path>
+dsh plugin --profile web add dsh-session-fork
 ```
 
 然后在任意会话里:

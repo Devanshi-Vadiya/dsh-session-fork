@@ -33,7 +33,7 @@ This is a plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-
 Install (requires a web-app-based dsh profile):
 
 ```sh
-dsh plugin --profile web add <npm-package-or-local-path>
+dsh plugin --profile web add dsh-session-fork
 ```
 
 Then, in any session:
