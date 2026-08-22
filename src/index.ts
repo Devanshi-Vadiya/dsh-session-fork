@@ -23,7 +23,7 @@ import type { BranchPorts, SourceSessionView } from './branch.js'
 import { BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction, createNamedBranch } from './command.js'
 import { forkSeedNoticeEvent } from './branch.js'
-import { loadRegistry } from './registry.js'
+import { loadRegistry, saveRegistry } from './registry.js'
 import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
 import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
 import { executeRebaseAction, parseRebaseAction } from './rebase-command.js'
@@ -423,6 +423,11 @@ export async function apply(ctx: Context): Promise<void> {
         // One domain record per workspace, exactly like the /branch path.
         async loadRegistry(workspaceKey) {
           return loadRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey))
+        },
+        // The `removeBranch` endpoint's write path: the same domain store
+        // as the load above, so load-modify-save lands in one record.
+        async saveRegistry(workspaceKey, state) {
+          await saveRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey), state)
         },
         // Graph assembly reads whole logs: live store first, persistence
         // inspect as the cold fallback — the same order makePorts.readSession
