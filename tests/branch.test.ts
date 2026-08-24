@@ -11,17 +11,25 @@ import {
   BranchForkError,
   createBranchFrom,
   createRootBranch,
+  forkSeedNoticeEvent,
 } from '../src/branch.js'
+import { buildBranchNotice, branchNoticeLines } from '../src/branch-events.js'
 import type { BranchPorts } from '../src/branch.js'
 import { anchoredBoundaryOf } from '../src/vendor/fork.js'
 
 type Call =
-  | { readonly kind: 'createChildFromSeed'; readonly sourceId: string; readonly cut: number; readonly childId: string }
+  | { readonly kind: 'createChildFromSeed'; readonly sourceId: string; readonly cut: number; readonly childId: string; readonly notified: boolean }
   | { readonly kind: 'renameSession'; readonly sessionId: string; readonly title: string }
 
 /** Build a fake source log from a compact event-type list. */
 function sessionOf(id: string, types: readonly string[]): SourceSessionView {
-  const events: SourceEvent[] = types.map((type, seq) => ({ seq, type }))
+  let turn = 0
+  const events: SourceEvent[] = types.map((type, seq) => {
+    // turn/end carries its 1-based turn number, like the real log; other
+    // event kinds keep `data` absent so structural reads stay exercised.
+    if (type === 'turn/start') turn += 1
+    return type === 'turn/end' ? { seq, type, data: { turn } } : { seq, type }
+  })
   return { id, events, header: {} }
 }
 
@@ -37,12 +45,13 @@ function portsOf(sessions: readonly SourceSessionView[]): BranchPorts & { calls:
     async readSession(sessionId) {
       return sessions.find(s => s.id === sessionId) ?? null
     },
-    async createChildFromSeed(childId, source, cut) {
+    async createChildFromSeed(childId, source, cut, forkNotice) {
       calls.push({
         kind: 'createChildFromSeed',
         sourceId: source.id,
         cut,
         childId,
+        notified: forkNotice !== undefined,
       })
     },
     async renameSession(sessionId, title) {
@@ -122,12 +131,12 @@ describe('createBranchFrom', () => {
     const ports = portsOf([sessionOf('parent', log)])
     const live = await createBranchFrom('parent', 'review', ports, { childId: 'child-1' })
     const cold = await createBranchFrom('parent', 'review-2', ports, { childId: 'child-2' })
-    expect(live.forkOrigin).toEqual({ parentSessionId: 'parent', atSeq: 8 })
-    expect(cold.forkOrigin).toEqual({ parentSessionId: 'parent', atSeq: 8 })
+    expect(live.record.forkOrigin).toEqual({ parentSessionId: 'parent', atSeq: 8 })
+    expect(cold.record.forkOrigin).toEqual({ parentSessionId: 'parent', atSeq: 8 })
     expect(ports.calls).toEqual([
-      { kind: 'createChildFromSeed', sourceId: 'parent', cut: 9, childId: 'child-1' },
+      { kind: 'createChildFromSeed', sourceId: 'parent', cut: 9, childId: 'child-1', notified: true },
       { kind: 'renameSession', sessionId: 'child-1', title: 'review' },
-      { kind: 'createChildFromSeed', sourceId: 'parent', cut: 9, childId: 'child-2' },
+      { kind: 'createChildFromSeed', sourceId: 'parent', cut: 9, childId: 'child-2', notified: true },
       { kind: 'renameSession', sessionId: 'child-2', title: 'review-2' },
     ])
   })
@@ -156,7 +165,7 @@ describe('createBranchFrom', () => {
 
   test('record is frozen and carries the anchoring turn/end', async () => {
     const ports = portsOf([sessionOf('parent', log)])
-    const record = await createBranchFrom('parent', 'review', ports, { childId: 'child-1' })
+    const { record } = await createBranchFrom('parent', 'review', ports, { childId: 'child-1' })
     expect(record).toEqual({
       name: 'review',
       sessionId: 'child-1',
@@ -168,7 +177,7 @@ describe('createBranchFrom', () => {
 
   test('atSeq lands on the containing turn/end in the record', async () => {
     const ports = portsOf([sessionOf('parent', log)])
-    const record = await createBranchFrom('parent', 'early', ports, {
+    const { record } = await createBranchFrom('parent', 'early', ports, {
       atSeq: 1,
       childId: 'child-3',
     })
@@ -201,8 +210,47 @@ describe('createBranchFrom', () => {
 
   test('generates a session-<uuid> child id when omitted', async () => {
     const ports = portsOf([sessionOf('parent', log)])
-    const record = await createBranchFrom('parent', 'auto', ports)
+    const { record } = await createBranchFrom('parent', 'auto', ports)
     expect(record.sessionId).toMatch(/^session-[0-9a-f-]{36}$/)
+  })
+
+  test('seed notice states registry lineage when the parent name is known', async () => {
+    // Issue #28: the child's first sight of its own history must name the
+    // branches and the fork turn, using the shared branch-events wording.
+    const ports = portsOf([sessionOf('parent', log)])
+    const { facts } = await createBranchFrom('parent', 'review', ports, {
+      childId: 'child-1',
+      parentName: 'main',
+    })
+    expect(facts).toEqual({
+      kind: 'fork',
+      from: 'main',
+      to: 'review',
+      atTurn: 2,
+      fromSessionId: 'parent',
+    })
+  })
+
+  test('seed notice falls back to the source session id for an unnamed parent', async () => {
+    const ports = portsOf([sessionOf('parent', log)])
+    const { facts } = await createBranchFrom('parent', 'review', ports, { childId: 'child-1' })
+    expect(facts.from).toBe('parent')
+  })
+
+  test('forkSeedNoticeEvent is a surface-appended user/message at the cut position', async () => {
+    const ports = portsOf([sessionOf('parent', log)])
+    const { facts } = await createBranchFrom('parent', 'review', ports, { childId: 'child-1' })
+    const event = forkSeedNoticeEvent(9, 1_700_000_000_000, buildBranchNotice(
+      facts,
+      branchNoticeLines.forkChild(facts),
+    ))
+    expect(event.type).toBe('user/message')
+    expect(event.seq).toBe(9)
+    expect(event.surfaceOp).toBe('append')
+    expect((event.data as { content: readonly { type: string; text: string }[] }).content[0]?.text)
+      .toContain('You are branch "review", forked from branch "parent" at turn 2')
+    const source = (event.data as { source: { branchEvent: typeof facts } }).source.branchEvent
+    expect(source.fromSessionId).toBe('parent')
   })
 })
 

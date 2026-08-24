@@ -16,11 +16,13 @@ import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-sess
 import type {} from '@deepseek-ai/dsh-session-persistence'
 // Same presence pattern for the compaction services the squash pipeline
 // consumes (`ctx.llm`, `ctx.tokenMeter`).
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type { BranchPorts, SourceSessionView } from './branch.js'
 import { BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction, createNamedBranch } from './command.js'
+import { forkSeedNoticeEvent } from './branch.js'
 import { loadRegistry } from './registry.js'
 import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
 import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
@@ -184,7 +186,7 @@ function makePorts(ctx: Context): BranchPorts {
         return null
       }
     },
-    async createChildFromSeed(childId, source, cut) {
+    async createChildFromSeed(childId, source, cut, forkNotice) {
       const log = sourceLogs.get(source)
       if (log === undefined) {
         // Invariant: makePorts always pairs a view with its full log. A miss
@@ -224,14 +226,21 @@ function makePorts(ctx: Context): BranchPorts {
         resolveSessionPreset(log),
       )
       // Seed the same default model selection the host's entry points use.
+      // Issue #28: the fork notice rides the seed as its final event —
+      // atomic with creation, at the inherit/own-history boundary — so
+      // `seedLength` counts it in and any grandchild fork inherits it.
+      const seed: SessionEvent[] = events.slice(0, cut)
+      if (forkNotice !== undefined) {
+        seed.push(forkSeedNoticeEvent(cut, Date.now(), forkNotice))
+      }
       const defaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
       await ctx.agents.create({
         sessionId: childId as Session['id'],
-        seed: events.slice(0, cut),
+        seed,
         meta: {
           ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
           parentSession: source.id as Session['id'],
-          seedLength: cut,
+          seedLength: seed.length,
           ...(forkComposition.agentPreset === undefined ? {} : { agentPreset: forkComposition.agentPreset }),
         },
         ...(defaultModel === undefined ? {} : { agentOptions: defaultModel.currentSelection() }),
@@ -341,6 +350,25 @@ export async function apply(ctx: Context): Promise<void> {
   const connection = ctx.get('connection') as ConnectionRpcLike | undefined
 
   ctx.effect(function* () {
+    // Parent-side fork notification (issue #28): deliver the one-line notice
+    // into the parent session through the agreed transport — `agent.inject()`
+    // (inbox next-step, NO wake): a busy parent receives it at its next step
+    // boundary; an idle parent holds it durably until its next turn. The
+    // agent resolves live-first, cold sources resume through the vendored
+    // ensureSession kernel (resume, never create), and the write is flushed
+    // but the agent never destroyed here. Never throws: the fork has already
+    // succeeded, a notification failure is a logged warning only.
+    const notifyForked = async (parentSessionId: string, notice: UserMessage): Promise<void> => {
+      try {
+        const agent = await getOrResumeAgent(getOrResumeDeps(ctx), parentSessionId as Session['id'])
+        agent.inject(notice)
+        await ctx.sessions.flush(agent.session)
+      } catch (error) {
+        ctx.logger.warn(
+          `dsh-session-fork: fork notification to parent "${parentSessionId}" failed: ${String(error)}`,
+        )
+      }
+    }
     yield ctx.commands.register({
       ...branchCommandDefinition,
       handler: (invocation: CommandInvocation): Promise<CommandResult> => {
@@ -351,6 +379,7 @@ export async function apply(ctx: Context): Promise<void> {
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             ports: makePorts(ctx),
             sessionExists: (id) => sessionExists(ctx, id),
+            notifyForked,
           }),
         ) as Promise<CommandResult>
         active.add(operation)
@@ -417,6 +446,7 @@ export async function apply(ctx: Context): Promise<void> {
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             ports: makePorts(ctx),
             sessionExists: (id) => sessionExists(ctx, id),
+            notifyForked,
           }, atSeq === undefined ? {} : { atSeq })
         },
         // The right-click squash action (issue #8): the same execution

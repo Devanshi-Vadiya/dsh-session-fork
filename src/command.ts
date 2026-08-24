@@ -6,6 +6,8 @@
  * @module dsh-session-fork/src/command
  */
 
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
+import { buildBranchNotice, branchNoticeLines } from './branch-events.js'
 import type { BranchPorts } from './branch.js'
 import { BranchForkError, createBranchFrom as forkToBranch, createRootBranch as adoptAsRoot } from './branch.js'
 import type { BranchListing, BranchRecord, RegistryState, RegistryStore, SessionExists } from './types.js'
@@ -98,6 +100,18 @@ export interface BranchCommandDeps {
   readonly ports: BranchPorts
   /** Liveness check for dangling marking. */
   readonly sessionExists: SessionExists
+  /**
+   * Parent-side fork notification (issue #28): deliver the one-line notice
+   * into the PARENT session. Called once per successful fork, AFTER the
+   * record is durably written. Contract: this callback never throws — the
+   * fork already succeeded, and a notification failure must surface as a
+   * logged warning, never as a failed `/branch create`. Implementations own
+   * their error handling.
+   */
+  readonly notifyForked?: (
+    parentSessionId: string,
+    notice: UserMessage,
+  ) => Promise<void>
 }
 
 /** Render one branch listing line. */
@@ -138,11 +152,19 @@ export async function createNamedBranch(
 ): Promise<BranchRecord> {
   const preState = await loadRegistry(deps.store)
   assertBranchNameFree(preState, name)
-  const record = await forkToBranch(
+  // Issue #28: resolve the source's registry name BEFORE forking so the
+  // seed-embedded notice states durable point-in-time lineage ("forked from
+  // branch X", not a session id) whenever the source is a registered branch.
+  const parentName = Object.values(preState.branches)
+    .find(record => record.sessionId === deps.currentSessionId)?.name
+  const { record, facts } = await forkToBranch(
     deps.currentSessionId,
     name,
     deps.ports,
-    options.atSeq === undefined ? {} : { atSeq: options.atSeq },
+    {
+      ...options.atSeq === undefined ? {} : { atSeq: options.atSeq },
+      ...parentName === undefined ? {} : { parentName },
+    },
   )
   const state = createBranch(preState, {
     name: record.name,
@@ -151,6 +173,15 @@ export async function createNamedBranch(
     createdAt: record.createdAt,
   })
   await saveRegistry(deps.store, state)
+  // Parent notification after the durable write (issue #28): the child's
+  // notice already rode the seed; this is the other direction, delivered
+  // through the never-throw `notifyForked` contract.
+  if (deps.notifyForked !== undefined && record.forkOrigin !== null) {
+    await deps.notifyForked(
+      record.forkOrigin.parentSessionId,
+      buildBranchNotice(facts, branchNoticeLines.forkParent(facts)),
+    )
+  }
   return record
 }
 

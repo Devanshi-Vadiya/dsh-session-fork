@@ -23,6 +23,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { buildBranchNotice, branchNoticeLines } from './branch-events.js'
+import type { BranchEventFacts } from './branch-events.js'
 import type { BranchRecord } from './types.js'
 import { anchoredBoundaryOf } from './vendor/fork.js'
 
@@ -76,6 +80,7 @@ export interface BranchPorts {
     childId: string,
     source: SourceSessionView,
     cut: number,
+    forkNotice?: UserMessage,
   ): Promise<void>
   renameSession(sessionId: string, title: string): Promise<void>
 }
@@ -89,6 +94,43 @@ export interface CreateBranchOptions {
   readonly atSeq?: number
   /** Explicit child session id; defaults to `session-<uuid>`. */
   readonly childId?: string
+  /**
+   * The source branch's registry name, used verbatim as the fork notice's
+   * `from` (issue #28: the child must learn its lineage). When omitted —
+   * forking an un-adopted session — the notice names the source session id,
+   * which is always durable truth.
+   */
+  readonly parentName?: string
+}
+
+/** The durable result of one fork, plus the facts its notices were built from. */
+export interface BranchForkOutcome {
+  readonly record: BranchRecord
+  /**
+   * Fork facts exactly as rendered into the child's seed notice (and,
+   * upstream, the parent's notification). Names are point-in-time registry
+   * values captured before the record write (cf. `branch-events.ts`).
+   */
+  readonly facts: BranchEventFacts
+}
+
+/**
+ * Build the seed-tail fork notice event: one `user/message` carrying the
+ * AI-visible lineage statement, ready to append to the sliced seed (issue
+ * #28). Pure construction; `seq` must be the next contiguous seed position
+ * (`cut`) so `Session.create`'s continuity validation accepts the seed.
+ * @param seq - the event's log position (== `cut`, the slice length).
+ * @param time - event timestamp in epoch ms.
+ * @param notice - the built fork notice message.
+ */
+export function forkSeedNoticeEvent(seq: number, time: number, notice: UserMessage): SessionEvent<'user/message'> {
+  return {
+    type: 'user/message',
+    seq,
+    time,
+    data: notice,
+    surfaceOp: 'append',
+  } as SessionEvent<'user/message'>
 }
 
 /**
@@ -96,12 +138,13 @@ export interface CreateBranchOptions {
  *
  * The record's `forkOrigin.atSeq` is the **seq of the anchoring `turn/end`
  * event in the parent's log** (log coordinates, not surface positions). The
- * child header's `seedLength` counts the whole seed slice — which may extend
- * past `atSeq` through trailing standalone events up to the next
- * `turn/start` — so `seedLength >= atSeq + 1`; locate the fork message with
- * `atSeq`, replay the seed with `seedLength`.
+ * child header's `seedLength` counts the whole seed slice — the inherited
+ * events **plus the fork notice event appended at the tail** (issue #28) —
+ * so `seedLength >= atSeq + 2`; locate the fork message with `atSeq`, replay
+ * the seed with `seedLength`.
  *
- * @returns the frozen {@link BranchRecord} for the new child branch.
+ * @returns the frozen {@link BranchRecord} for the new child plus the fork
+ * {@link BranchEventFacts} its notices were built from.
  * @throws {@link BranchForkError} `source-not-found` / `fork-unavailable`.
  */
 export async function createBranchFrom(
@@ -109,7 +152,7 @@ export async function createBranchFrom(
   name: string,
   ports: BranchPorts,
   options: CreateBranchOptions = {},
-): Promise<BranchRecord> {
+): Promise<BranchForkOutcome> {
   const source = await ports.readSession(sourceSessionId)
   if (source === null) {
     throw new BranchForkError(
@@ -127,18 +170,32 @@ export async function createBranchFrom(
     )
   }
   const childId = options.childId ?? `session-${randomUUID() as string}`
+  // Issue #28: the turn number of the anchoring `turn/end` names the fork
+  // point in the units every reader already uses (turns, not log seqs).
+  const anchorTurn = (source.events[boundary.boundarySeq]?.data as { turn?: number } | undefined)?.turn
+  const facts: BranchEventFacts = {
+    kind: 'fork',
+    from: options.parentName ?? source.id,
+    to: name,
+    ...(anchorTurn === undefined ? {} : { atTurn: anchorTurn }),
+    fromSessionId: source.id,
+  }
+  const forkNotice = buildBranchNotice(facts, branchNoticeLines.forkChild(facts))
   // Single official route: agents.create with the seed prefix + workspace
   // attach, regardless of whether the source is live or on-disk. This is
   // exactly what the web GUI's fork does (api-proxy session.fork), and it
-  // is the only path that produces a durable, workspace-listed child.
-  await ports.createChildFromSeed(childId, source, boundary.cut)
+  // is the only path that produces a durable, workspace-listed child. The
+  // seed carries the fork notice as its final event (issue #28): atomic
+  // with creation, always at the inherit/own-history boundary, inherited
+  // verbatim by any grandchild fork.
+  await ports.createChildFromSeed(childId, source, boundary.cut, forkNotice)
   // Issue #7: the branch name becomes the child's pinned title through the
   // official session.rename handler. The registry gate already proved the
   // official normalizer holds this name to identity, so this rename is
   // deterministic; a failure here is an internal anomaly that must surface
   // (the child stays listed like any anonymous fork, without a ref).
   await ports.renameSession(childId, name)
-  return Object.freeze({
+  const record: BranchRecord = Object.freeze({
     name,
     sessionId: childId,
     forkOrigin: Object.freeze({
@@ -147,6 +204,7 @@ export async function createBranchFrom(
     }),
     createdAt: new Date().toISOString(),
   })
+  return { record, facts }
 }
 
 /**
