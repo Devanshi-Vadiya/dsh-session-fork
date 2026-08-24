@@ -398,9 +398,15 @@ function checkpointUserMessage(compactionId: string, text: string): UserMessage 
   })
 }
 
-/** Minimal fake agent around a session and a phase kind. */
-function fakeAgent(session: Session, phaseKind: string): Agent {
-  return { session, phase: { kind: phaseKind } } as unknown as Agent
+/** Minimal fake agent around a session, a phase kind, and an inject spy. */
+function fakeAgent(session: Session, phaseKind: string): Agent & { injected: unknown[] } {
+  const injected: unknown[] = []
+  return {
+    session,
+    phase: { kind: phaseKind },
+    injected,
+    inject(message: never) { injected.push(message) },
+  } as unknown as Agent & { injected: unknown[] }
 }
 
 const SQUASH_RESULT = {
@@ -448,16 +454,15 @@ function squashPorts(options: {
   readonly compactResult?: CompactionResult
   readonly compactError?: Error
 } = {}): SquashPorts & {
-  readonly appended: unknown[]
+  readonly injected: unknown[]
   readonly flushes: string[]
   readonly compactCalls: number
 } {
-  const appended: unknown[] = []
   const flushes: string[] = []
   let compactCalls = 0
   const child = fakeAgent(options.childSession ?? squashChildSession(), options.childPhase ?? 'idle')
   const parent = fakeAgent(
-    fakeSession({ id: 'session-parent' }, [], [], appended),
+    fakeSession({ id: 'session-parent' }, [], []),
     'idle',
   )
   const store: RegistryStore = {
@@ -465,7 +470,7 @@ function squashPorts(options: {
     save: async () => {},
   }
   return {
-    appended,
+    injected: parent.injected,
     flushes,
     get compactCalls() { return compactCalls },
     async resolveChildAgent() {
@@ -485,7 +490,7 @@ function squashPorts(options: {
 }
 
 describe('createBranchRpcHandler squash endpoint', () => {
-  test('success: full pipeline, parent append + flush, command-shaped message', async () => {
+  test('success: full pipeline, parent queue delivery + flush, command-shaped message', async () => {
     const ports = squashPorts()
     const { ports: harness } = portsHarness({
       workspaces: { '/work': SQUASH_WORKSPACE },
@@ -499,8 +504,8 @@ describe('createBranchRpcHandler squash endpoint', () => {
       value: { message: expect.stringContaining("into branch 'main'") },
     })
     expect(ports.compactCalls).toBe(1)
-    // The merge checkpoint landed in the parent, and the write was flushed.
-    expect(ports.appended).toHaveLength(1)
+    // The merge envelope was queued into the parent, and the write was flushed.
+    expect(ports.injected).toHaveLength(1)
     expect(ports.flushes).toContain('session-parent')
   })
 

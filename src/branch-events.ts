@@ -22,6 +22,10 @@
  *   (seed embedding, inbox injection, maintenance-window append). Keeping
  *   the text here keeps the three branches merge-conflict-free.
  *
+ * - 2026-08-22 extension: both builders accept `extraSource` — caller-owned
+ *   fields spread onto the message `source` AFTER `branchEvent` (e.g.
+ *   MergeCheckpointSource's childSessionId/atSeq/shadowedRange/...).
+ *   Optional: existing callers and wire shapes are unchanged.
  * Pure text construction, no cordis, no I/O — unit-testable with plain
  * assertions, mirroring the purity discipline of `squash.ts`.
  * @module dsh-session-fork/src/branch-events
@@ -80,17 +84,34 @@ export interface BranchEventPage {
 }
 
 /**
+ * Caller-owned source fields. The reserved keys a builder owns (`kind`,
+ * `form`, `summary`, `branchEvent`) are compile-time rejected so a caller can
+ * never silently rewrite the envelope's semantics; overriding `plugin` (the
+ * squash checkpoint's `isCompactCheckpointSource` compatibility) stays legal.
+ */
+export type BranchEventExtraSource = Record<string, unknown> & {
+  kind?: never
+  form?: never
+  summary?: never
+  branchEvent?: never
+}
+
+/**
  * Build a one-line branch event notice: no payload, no tags. Used for fork
  * notifications in both directions (the parent learns it was forked; the
  * child's seed marker is a notice too — a fork carries no payload, only the
  * fact of divergence).
  * @param facts - the event facts; `kind` must be 'fork'.
  * @param line - the complete one-line statement.
+ * @param extraSource - caller-owned fields spread onto the source AFTER
+ *   `branchEvent` (e.g. MergeCheckpointSource fields); the reserved keys this
+ *   builder owns are compile-time rejected ({@link BranchEventExtraSource}).
  * @returns a user message whose source carries the structured provenance.
  */
 export function buildBranchNotice(
   facts: BranchEventFacts,
   line: string,
+  extraSource?: BranchEventExtraSource,
 ): UserMessage {
   return createUserMessage({
     content: [{ type: 'text', text: line }],
@@ -100,7 +121,8 @@ export function buildBranchNotice(
       form: 'notice',
       summary: boundContextSummary(`${facts.kind}: ${facts.from} → ${facts.to}`),
       branchEvent: facts,
-    },
+      ...extraSource,
+    } as BranchEventSource & Record<string, unknown>,
   })
 }
 
@@ -138,12 +160,16 @@ const MATERIAL_NOUN: Readonly<Record<BranchEventKind, string>> = {
  * @param facts - the event facts; `kind` is 'squash' or 'rebase' (fork has no payload).
  * @param payload - the verbatim payload text (summary or transcript page).
  * @param page - paging coordinates for multi-message rebase transcripts.
+ * @param extraSource - caller-owned fields spread onto the source AFTER
+ *   `branchEvent` (e.g. MergeCheckpointSource fields); the reserved keys this
+ *   builder owns are compile-time rejected ({@link BranchEventExtraSource}).
  * @returns a user message whose source carries the structured provenance.
  */
 export function buildBranchEnvelope(
   facts: BranchEventFacts,
   payload: string,
   page?: BranchEventPage,
+  extraSource?: BranchEventExtraSource,
 ): UserMessage {
   const pagePart = page !== undefined && page.total > 1 ? ` ${page.index}/${page.total}` : ''
   const rangePart = facts.range !== undefined ? `, covering its turns ${facts.range.start}–${facts.range.end}` : ''
@@ -169,6 +195,7 @@ export function buildBranchEnvelope(
           : `${facts.kind}: ${facts.from} → ${facts.to}`,
       ),
       branchEvent: facts,
-    },
+      ...extraSource,
+    } as BranchEventSource & Record<string, unknown>,
   })
 }

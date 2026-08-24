@@ -34,7 +34,7 @@ import { assembleBranchGraph, extractTurns, summarizeTurnEvents } from './graph.
 import type { BranchGraph, BranchLike, GraphNode, GraphNodeRef, GraphSessionLog } from './graph.js'
 import { listBranches } from './registry.js'
 import { executeSquash } from './squash-command.js'
-import type { SquashAgent } from './squash-command.js'
+import type { SquashChildAgent } from './squash-command.js'
 import type { ForkOrigin, RegistryState, RegistryStore, SessionExists } from './types.js'
 import type { CompactRegionRequest } from './vendor/compact.js'
 
@@ -179,7 +179,7 @@ export interface SquashPorts {
    * resumed agent is flushed after the write but never destroyed.
    * `null` when the session does not exist at all.
    */
-  resolveChildAgent(sessionId: string): Promise<SquashAgent | null>
+  resolveChildAgent(sessionId: string): Promise<SquashChildAgent | null>
   /** Open the workspace-keyed registry store for the pipeline. */
   openStore(workspaceKey: string): RegistryStore
   /** The vendored compaction shell (runMaintenance inside). */
@@ -188,8 +188,8 @@ export interface SquashPorts {
     signal: AbortSignal,
     request: CompactRegionRequest,
   ): Promise<CompactionResult>
-  /** Parent-side agent resolution (vendored ensureSession kernel). */
-  resolveParentAgent(sessionId: string): Promise<SquashAgent>
+  /** Parent-side agent resolution (vendored ensureSession kernel); public `Agent` only — delivery goes through `inject`. */
+  resolveParentAgent(sessionId: string): Promise<Agent>
   /** Durability checkpoint for one agent's session (`ctx.sessions.flush`). */
   flush(agent: Agent): Promise<unknown>
 }

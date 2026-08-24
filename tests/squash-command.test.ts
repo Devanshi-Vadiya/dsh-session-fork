@@ -57,9 +57,15 @@ function checkpointUserMessage(compactionId: string, text: string): UserMessage 
   })
 }
 
-/** Minimal fake agent around a session and a phase kind. */
-function fakeAgent(session: Session, phaseKind: string): Agent {
-  return { session, phase: { kind: phaseKind } } as unknown as Agent
+/** Minimal fake agent around a session, a phase kind, and an inject spy. */
+function fakeAgent(session: Session, phaseKind: string): Agent & { injected: UserMessage[] } {
+  const injected: UserMessage[] = []
+  return {
+    session,
+    phase: { kind: phaseKind },
+    injected,
+    inject(message: UserMessage) { injected.push(message) },
+  } as unknown as Agent & { injected: UserMessage[] }
 }
 
 /** A memory registry store over one mutable state. */
@@ -77,6 +83,13 @@ const MAIN_RECORD = {
   forkOrigin: null,
 }
 
+/** The child fixture's own registry record (registered as 'review'). */
+const REVIEW_RECORD = {
+  name: 'review',
+  sessionId: 'session-child',
+  forkOrigin: { parentSessionId: 'session-parent', atSeq: 1 },
+}
+
 /** The child fixture: seed prefix, seed boundary, two post-fork nodes, and the compaction's landed checkpoint as the surface tail. */
 function childFixture(): Session {
   return fakeSession(
@@ -84,7 +97,7 @@ function childFixture(): Session {
     [
       { type: 'user/message' },
       { type: 'session/end-seed' },
-      { type: 'user/message' },
+      { type: 'assistant/message', data: { turn: 2, step: 1, message: { content: [] } } },
       { type: 'user/message', data: { message: checkpointUserMessage('compaction-1', 'summary body') } },
     ],
     [0, 2, 3],
@@ -128,23 +141,21 @@ describe('executeSquashAction', () => {
   /** Assemble deps around fixture parts; every part is overridable. */
   function makeDefs(overrides: Partial<SquashCommandDeps> = {}): {
     deps: SquashCommandDeps
-    appended: unknown[]
     flushed: Agent[]
     compactCalls: unknown[]
-    parentAgent: Agent
+    parentAgent: Agent & { injected: UserMessage[] }
   } {
-    const appended: unknown[] = []
     const flushed: Agent[] = []
     const compactCalls: unknown[] = []
     const childAgent = fakeAgent(childFixture(), 'idle')
     const parentAgent = fakeAgent(
-      fakeSession({ id: 'session-parent' }, [{ type: 'user/message' }], [0], appended),
+      fakeSession({ id: 'session-parent' }, [{ type: 'user/message' }], [0]),
       'idle',
     )
     const deps: SquashCommandDeps = {
       childAgent,
       signal: new AbortController().signal,
-      store: memoryStore({ branches: { main: MAIN_RECORD } }),
+      store: memoryStore({ branches: { main: MAIN_RECORD, review: REVIEW_RECORD } }),
       compact: async (agent, signal, request) => {
         compactCalls.push({ agent, signal, request })
         return FAKE_RESULT
@@ -153,11 +164,11 @@ describe('executeSquashAction', () => {
       flush: async (agent) => { flushed.push(agent) },
       ...overrides,
     }
-    return { deps, appended, flushed, compactCalls, parentAgent }
+    return { deps, flushed, compactCalls, parentAgent }
   }
 
-  test('squashes the post-fork region into the parent checkpoint', async () => {
-    const { deps, appended, flushed, compactCalls } = makeDefs()
+  test('squashes the post-fork region and queues the merge envelope into the parent', async () => {
+    const { deps, flushed, compactCalls, parentAgent } = makeDefs()
     const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
     expect(result.kind).toBe('success')
     expect(result.kind === 'success' && result.text).toContain(`into branch 'main' as one checkpoint`)
@@ -167,15 +178,18 @@ describe('executeSquashAction', () => {
     const request = (compactCalls[0] as { request: { start: number; end: number } }).request
     expect(request).toMatchObject({ start: 2, end: 3 })
 
-    // The parent gained exactly one appended user message: the merge
-    // checkpoint, still recognized as a compaction checkpoint and carrying
-    // the fork-merge provenance.
-    expect(appended.length).toBe(1)
-    const record = appended[0] as { type: string; data: UserMessage; opts: { surfaceOp: unknown } }
-    expect(record.type).toBe('user/message')
-    expect(record.opts.surfaceOp).toBe('append')
-    const source = record.data.source as Record<string, unknown>
-    expect(isCompactCheckpointSource(record.data.source)).toBe(true)
+    // The parent received exactly one injected message through the public
+    // queue API: the merge envelope, still recognized as a compaction
+    // checkpoint and carrying the fork-merge provenance.
+    expect(parentAgent.injected.length).toBe(1)
+    const injected = parentAgent.injected[0]!
+    expect(injected.role).toBe('user')
+    // The merge message is a squash envelope naming both branches.
+    const body = injected.content.find(b => b.type === 'text')?.text ?? ''
+    expect(body.startsWith('This is a squash from branch "review" (covering its turns 2–2) into branch "main". ')).toBe(true)
+    expect(body).toContain('<branch-squash>\nsummary body\n</branch-squash>')
+    const source = injected.source as Record<string, unknown>
+    expect(isCompactCheckpointSource(injected.source)).toBe(true)
     expect(source.childSessionId).toBe('session-child')
     expect(source.atSeq).toBe(1) // seedLength 2 anchors one past the turn end
     expect(source.shadowedSeqs).toEqual([2, 3])
@@ -184,6 +198,7 @@ describe('executeSquashAction', () => {
     // The parent was flushed (and the child flushed through the compact
     // request's durability hook).
     expect(flushed.length).toBe(1)
+    expect(flushed[0]).toBe(parentAgent)
   })
 
   test('a busy child fails fast with the squash busy wording', async () => {
@@ -228,15 +243,19 @@ describe('executeSquashAction', () => {
     expect(result.kind === 'error' && result.text).toContain('could not produce a useful summary')
   })
 
-  test('a busy parent agent is reported, nothing appended', async () => {
+  test('a busy parent no longer blocks delivery (queue model, issue #27)', async () => {
     const busyParent = fakeAgent(
       fakeSession({ id: 'session-parent' }, [{ type: 'user/message' }], [0]),
       'running',
     )
-    const { deps, appended } = makeDefs({ resolveParentAgent: async () => busyParent })
+    const { deps, flushed } = makeDefs({ resolveParentAgent: async () => busyParent })
     const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
-    expect(result.kind === 'error' && result.text).toContain('busy')
-    expect(appended.length).toBe(0)
+    expect(result.kind).toBe('success')
+    // The envelope was queued through inject and still flushed durably.
+    expect(busyParent.injected.length).toBe(1)
+    expect(busyParent.injected[0]!.content.find(b => b.type === 'text')?.text).toContain('<branch-squash>')
+    expect(flushed.length).toBe(1)
+    expect(flushed[0]).toBe(busyParent)
   })
 
   test('a missing fork anchor is rejected before compaction', async () => {
@@ -253,13 +272,31 @@ describe('executeSquashAction', () => {
       ),
       'idle',
     )
-    const { deps } = makeDefs({ childAgent: child })
+    const { deps } = makeDefs({ childAgent: child, store: memoryStore({ branches: { main: MAIN_RECORD } }) })
     const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
     expect(result.kind === 'error' && result.text).toContain('fork anchor')
   })
 
+  test('an unregistered child session is rejected before compaction', async () => {
+    const child = fakeAgent(
+      fakeSession(
+        { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+        [
+          { type: 'user/message' },
+          { type: 'session/end-seed' },
+          { type: 'user/message' },
+        ],
+        [0, 2],
+      ),
+      'idle',
+    )
+    const { deps } = makeDefs({ childAgent: child, store: memoryStore({ branches: { main: MAIN_RECORD } }) })
+    const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
+    expect(result.kind === 'error' && result.text).toContain('branch name')
+  })
+
   test('the child registry record wins over the header fallback for atSeq', async () => {
-    const { deps, appended } = makeDefs({
+    const { deps, parentAgent } = makeDefs({
       store: memoryStore({
         branches: {
           main: MAIN_RECORD,
@@ -273,7 +310,7 @@ describe('executeSquashAction', () => {
     })
     const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
     expect(result.kind).toBe('success')
-    const record = appended[0] as { data: UserMessage }
-    expect((record.data.source as Record<string, unknown>).atSeq).toBe(7)
+    const injected = parentAgent.injected[0]!
+    expect((injected.source as Record<string, unknown>).atSeq).toBe(7)
   })
 })
