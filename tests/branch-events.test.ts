@@ -117,3 +117,36 @@ describe('buildBranchEnvelope', () => {
     expect((buildBranchEnvelope(squashFacts, 't').source as { form: string }).form).toBe('notice')
   })
 })
+
+describe('source extensions (extraSource)', () => {
+  const tracedFacts: BranchEventFacts = {
+    ...squashFacts,
+  }
+
+  test('extraSource fields ride the built message source after branchEvent', () => {
+    const extra = {
+      childSessionId: 'sess-child',
+      atSeq: 7,
+      shadowedRange: { start: 13, end: 20 },
+      shadowedSeqs: [26, 27],
+      sourceCommandId: 'cmd-9',
+    }
+    expect(buildBranchEnvelope(tracedFacts, 'payload', undefined, extra).source).toMatchObject({
+      kind: 'plugin',
+      plugin: 'dsh-session-fork',
+      branchEvent: tracedFacts,
+      ...extra,
+    })
+    expect(buildBranchNotice(tracedFacts, 'line', { childSessionId: 'sess-child' }).source).toMatchObject({
+      branchEvent: tracedFacts,
+      childSessionId: 'sess-child',
+    })
+  })
+
+  test('omitting extraSource leaves the source shape unchanged (regression)', () => {
+    const source = buildBranchEnvelope(squashFacts, 'payload').source as Record<string, unknown>
+    expect(Object.keys(source).sort()).toEqual(['branchEvent', 'form', 'kind', 'plugin', 'summary'])
+    const noticeSource = buildBranchNotice(forkFacts, 'line').source as Record<string, unknown>
+    expect(Object.keys(noticeSource).sort()).toEqual(['branchEvent', 'form', 'kind', 'plugin', 'summary'])
+  })
+})
