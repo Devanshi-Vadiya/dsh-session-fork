@@ -22,6 +22,7 @@ import {
   squashErrorText,
   SquashCoreError,
 } from './squash.js'
+import { turnRangeOf } from './squash.js'
 import type { MergeProvenance } from './squash.js'
 import type { RegistryStore } from './types.js'
 import type { CompactRegionRequest } from './vendor/compact.js'
@@ -153,6 +154,17 @@ export async function executeSquash(
   if (atSeq === undefined) {
     return { kind: 'error', text: 'cannot determine the fork anchor for merge provenance' }
   }
+  // Branch names are point-in-time facts: resolve them from the registry now,
+  // before building the merge envelope. The target is the registry key the
+  // user named; the child must be a registered branch to be named in the
+  // AI-visible provenance.
+  const childName = childRecord?.name
+  if (childName === undefined) {
+    return {
+      kind: 'error',
+      text: 'cannot resolve this session\'s branch name — register the branch before squashing',
+    }
+  }
 
   let range
   try {
@@ -183,11 +195,16 @@ export async function executeSquash(
     atSeq,
     shadowedRange: result.shadowedRange,
     shadowedSeqs: result.shadowedSeqs,
+    turnRange: turnRangeOf(childSession, result.shadowedSeqs),
     compactionId: result.compactionId,
     ...deps.commandId === undefined ? {} : { sourceCommandId: deps.commandId },
   }
   try {
-    mergeMessage = buildMergeCheckpoint(extractCheckpointMessage(childSession), provenance)
+    mergeMessage = buildMergeCheckpoint(
+      extractCheckpointMessage(childSession),
+      provenance,
+      { child: childName, target },
+    )
   } catch (error) {
     if (error instanceof SquashCoreError) return { kind: 'error', text: error.message }
     throw error

@@ -77,6 +77,13 @@ const MAIN_RECORD = {
   forkOrigin: null,
 }
 
+/** The child fixture's own registry record (registered as 'review'). */
+const REVIEW_RECORD = {
+  name: 'review',
+  sessionId: 'session-child',
+  forkOrigin: { parentSessionId: 'session-parent', atSeq: 1 },
+}
+
 /** The child fixture: seed prefix, seed boundary, two post-fork nodes, and the compaction's landed checkpoint as the surface tail. */
 function childFixture(): Session {
   return fakeSession(
@@ -84,7 +91,7 @@ function childFixture(): Session {
     [
       { type: 'user/message' },
       { type: 'session/end-seed' },
-      { type: 'user/message' },
+      { type: 'assistant/message', data: { turn: 2, step: 1, message: { content: [] } } },
       { type: 'user/message', data: { message: checkpointUserMessage('compaction-1', 'summary body') } },
     ],
     [0, 2, 3],
@@ -144,7 +151,7 @@ describe('executeSquashAction', () => {
     const deps: SquashCommandDeps = {
       childAgent,
       signal: new AbortController().signal,
-      store: memoryStore({ branches: { main: MAIN_RECORD } }),
+      store: memoryStore({ branches: { main: MAIN_RECORD, review: REVIEW_RECORD } }),
       compact: async (agent, signal, request) => {
         compactCalls.push({ agent, signal, request })
         return FAKE_RESULT
@@ -174,6 +181,10 @@ describe('executeSquashAction', () => {
     const record = appended[0] as { type: string; data: UserMessage; opts: { surfaceOp: unknown } }
     expect(record.type).toBe('user/message')
     expect(record.opts.surfaceOp).toBe('append')
+    // The merge message is a squash envelope naming both branches.
+    const body = record.data.content.find(b => b.type === 'text')?.text ?? ''
+    expect(body.startsWith('This is a squash from branch "review" (covering its turns 2–2) into branch "main". ')).toBe(true)
+    expect(body).toContain('<branch-squash>\nsummary body\n</branch-squash>')
     const source = record.data.source as Record<string, unknown>
     expect(isCompactCheckpointSource(record.data.source)).toBe(true)
     expect(source.childSessionId).toBe('session-child')
@@ -253,9 +264,27 @@ describe('executeSquashAction', () => {
       ),
       'idle',
     )
-    const { deps } = makeDefs({ childAgent: child })
+    const { deps } = makeDefs({ childAgent: child, store: memoryStore({ branches: { main: MAIN_RECORD } }) })
     const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
     expect(result.kind === 'error' && result.text).toContain('fork anchor')
+  })
+
+  test('an unregistered child session is rejected before compaction', async () => {
+    const child = fakeAgent(
+      fakeSession(
+        { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+        [
+          { type: 'user/message' },
+          { type: 'session/end-seed' },
+          { type: 'user/message' },
+        ],
+        [0, 2],
+      ),
+      'idle',
+    )
+    const { deps } = makeDefs({ childAgent: child, store: memoryStore({ branches: { main: MAIN_RECORD } }) })
+    const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
+    expect(result.kind === 'error' && result.text).toContain('branch name')
   })
 
   test('the child registry record wins over the header fallback for atSeq', async () => {

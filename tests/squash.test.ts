@@ -19,6 +19,7 @@ import {
   postForkRange,
   squashErrorText,
   SquashCoreError,
+  turnRangeOf,
 } from '../src/squash.js'
 import type { MergeCheckpointSource } from '../src/squash.js'
 
@@ -206,21 +207,53 @@ describe('extractCheckpointMessage', () => {
   })
 })
 
+describe('turnRangeOf', () => {
+  test('min/max over events that carry a turn, ignoring the rest', () => {
+    const session = fakeSession(
+      [
+        { type: 'user/message' },
+        { type: 'assistant/message', data: { turn: 4, step: 1 } },
+        { type: 'tool/result', data: { turn: 2, step: 1 } },
+        { type: 'assistant/message', data: { turn: 6, step: 2 } },
+      ],
+      [0, 1, 2, 3],
+    )
+    expect(turnRangeOf(session, [1, 2, 3])).toEqual({ start: 2, end: 6 })
+    expect(turnRangeOf(session, [1])).toEqual({ start: 4, end: 4 })
+  })
+
+  test('undefined when no shadowed event carries a turn', () => {
+    const session = fakeSession([{ type: 'user/message' }, { type: 'user/message' }], [0, 1])
+    expect(turnRangeOf(session, [0, 1])).toBeUndefined()
+    expect(turnRangeOf(session, [])).toBeUndefined()
+  })
+})
+
 describe('buildMergeCheckpoint', () => {
   const checkpoint = checkpointUserMessage('child-compaction', 'the conclusion')
+  const names = { child: 'review', target: 'main' }
 
-  test('keeps the checkpoint content and stays a recognized compaction checkpoint', () => {
+  test('wraps the checkpoint payload in the squash envelope, keeping the compaction checkpoint marker', () => {
     const merged = buildMergeCheckpoint(checkpoint, {
       childSessionId: 'session-child' as Session['id'],
       atSeq: 41,
       shadowedRange: { start: 3, end: 9 },
       shadowedSeqs: [3, 4, 9],
+      // Deliberately different numbers from shadowedRange: the preamble and
+      // branchEvent must speak turns, the source keeps seq coordinates.
+      turnRange: { start: 2, end: 5 },
       compactionId: CompactionId('child-compaction'),
-    })
+    }, names)
     expect(merged.role).toBe('user')
-    expect(merged.content).toEqual(checkpoint.content)
+    const text = merged.content.find(b => b.type === 'text')?.text ?? ''
+    expect(text.startsWith(
+      'This is a squash from branch "review" (covering its turns 2–5) into branch "main". ',
+    )).toBe(true)
+    expect(text).toContain('<branch-squash>\nthe conclusion\n</branch-squash>')
+    // Guard compatibility: plugin must stay 'compact' so official consumers
+    // keep recognizing this node as a compaction checkpoint.
     expect(isCompactCheckpointSource(merged.source)).toBe(true)
-    const source = merged.source as MergeCheckpointSource
+    const source = merged.source as MergeCheckpointSource & { branchEvent: Record<string, unknown> }
     expect(source.kind).toBe('plugin')
     expect(source.plugin).toBe('compact')
     expect(source.childSessionId).toBe('session-child')
@@ -229,6 +262,46 @@ describe('buildMergeCheckpoint', () => {
     expect(source.shadowedSeqs).toEqual([3, 4, 9])
     expect(source.compactionId).toBe(CompactionId('child-compaction'))
     expect('sourceCommandId' in source).toBe(false)
+    expect(source.branchEvent).toMatchObject({
+      kind: 'squash',
+      from: 'review',
+      to: 'main',
+      range: { start: 2, end: 5 },
+      fromSessionId: 'session-child',
+    })
+  })
+
+  test('omits the range clause when no turn range is known', () => {
+    const merged = buildMergeCheckpoint(checkpoint, {
+      childSessionId: 'session-child' as Session['id'],
+      atSeq: 41,
+      shadowedRange: { start: 3, end: 9 },
+      shadowedSeqs: [3, 4, 9],
+      compactionId: CompactionId('child-compaction'),
+    }, names)
+    const text = merged.content.find(b => b.type === 'text')?.text ?? ''
+    expect(text.startsWith('This is a squash from branch "review" into branch "main". ')).toBe(true)
+    const source = merged.source as { branchEvent: Record<string, unknown> }
+    expect('range' in source.branchEvent).toBe(false)
+  })
+
+  test('non-text checkpoint blocks surface as opaque placeholders instead of vanishing', () => {
+    const mixed = createUserMessage({
+      content: [
+        { type: 'text', text: 'the conclusion' },
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' } as never,
+      ],
+      source: compactCheckpointSource(CompactionId('child-compaction')),
+    })
+    const merged = buildMergeCheckpoint(mixed, {
+      childSessionId: 'session-child' as Session['id'],
+      atSeq: 41,
+      shadowedRange: { start: 3, end: 9 },
+      shadowedSeqs: [3, 4, 9],
+      compactionId: CompactionId('child-compaction'),
+    }, names)
+    const text = merged.content.find(b => b.type === 'text')?.text ?? ''
+    expect(text).toContain('<branch-squash>\nthe conclusion\n(opaque image block)\n</branch-squash>')
   })
 
   test('records the initiating command id when present', () => {
@@ -239,7 +312,7 @@ describe('buildMergeCheckpoint', () => {
       shadowedSeqs: [3, 4, 9],
       compactionId: CompactionId('child-compaction'),
       sourceCommandId: 'cmd-7' as CommandId,
-    })
+    }, names)
     const source = merged.source as MergeCheckpointSource
     expect(source.sourceCommandId).toBe('cmd-7')
     expect(isCompactCheckpointSource(merged.source)).toBe(true)

@@ -20,9 +20,9 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import type { ManualCompactionErrorCode } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { buildBranchEnvelope } from './branch-events.js'
 
 /** Typed failure codes of the pure squash logic. */
 export type SquashCoreErrorCode =
@@ -144,6 +144,14 @@ export interface MergeProvenance {
   readonly shadowedRange: { readonly start: number; readonly end: number }
   /** The shadowed surface-node seqs, in surface order. */
   readonly shadowedSeqs: readonly number[]
+  /**
+   * The compacted region in TURN coordinates, for the model-facing envelope
+   * preamble (`covering its turns A–B`). `shadowedRange` is surface-seq
+   * coordinates and must never reach the preamble — the two coordinate
+   * systems diverge whenever non-surface events (chunks, boundaries) sit
+   * inside the region. Absent when no shadowed event carries a turn number.
+   */
+  readonly turnRange?: { readonly start: number; readonly end: number }
   /** The child compaction's durable transaction identity. */
   readonly compactionId: CompactionId
   /** The /squash command that initiated the compaction, when present. */
@@ -169,33 +177,95 @@ export interface MergeCheckpointSource {
 }
 
 /**
+ * Registry-resolved branch names for the merge envelope, resolved by the
+ * command layer BEFORE building (names are point-in-time facts, exactly like
+ * commit messages).
+ */
+export interface MergeBranchNames {
+  /** Name of the child branch being squashed (the `from` of the event). */
+  readonly child: string
+  /** Name of the target branch the checkpoint is merged into (the `to`). */
+  readonly target: string
+}
+
+/**
+ * Derive the inclusive turn range covered by shadowed surface nodes: the min
+ * and max `turn` over the events that carry one (`assistant/message`,
+ * `tool/result`; `user/message` data is the message itself and has no turn
+ * field). Used to state the squash region in the model-facing preamble in
+ * turn coordinates rather than surface seqs.
+ * @param session - the child session that owns the shadowed seqs.
+ * @param seqs - shadowed surface-node seqs, in any order.
+ * @returns the inclusive turn range, or undefined when no seq carries a turn.
+ */
+export function turnRangeOf(
+  session: Session,
+  seqs: readonly number[],
+): { readonly start: number; readonly end: number } | undefined {
+  let start = Infinity
+  let end = -Infinity
+  for (const seq of seqs) {
+    const data = session.events[seq]?.data as { turn?: unknown } | undefined
+    if (typeof data?.turn === 'number') {
+      start = Math.min(start, data.turn)
+      end = Math.max(end, data.turn)
+    }
+  }
+  return start === Infinity ? undefined : { start, end }
+}
+
+/**
  * Build the message appended into the parent branch: the child checkpoint's
- * content (the conclusion itself), re-sourced with the compaction identity
- * plus the fork-merge provenance. The official session-event vocabulary is
- * closed to downstream plugins, so no custom merge event is emitted — the
- * provenance rides this message's plugin source.
+ * payload (the conclusion itself, tags and all — nested `<compacted-summary>`
+ * tags inside `<branch-squash>` are honest about the material's origin)
+ * wrapped in the shared branch-event envelope, with the compaction identity
+ * plus the fork-merge provenance riding the source. The official
+ * session-event vocabulary is closed to downstream plugins, so no custom
+ * merge event is emitted — the provenance rides this message's plugin source.
+ *
+ * Guard compatibility: `isCompactCheckpointSource` requires
+ * `plugin === 'compact'` (dsh-compaction lib/types/checkpoint.js), so
+ * `extraSource` overrides the envelope's `plugin: 'dsh-session-fork'` back to
+ * `'compact'` — the merged node stays a recognized compaction checkpoint for
+ * every official consumer.
+ *
+ * Coordinates: `atTurn` is deliberately omitted — `atSeq` is a parent-log
+ * seq and the child's turn numbers are not cheaply derivable at this seam.
+ * `facts.range` carries `shadowedRange` in child surface positions, which is
+ * the child log's own coordinate system.
  * @param checkpointMessage - the child's checkpoint message from {@link extractCheckpointMessage}.
  * @param provenance - fork and compaction facts to record on the source.
+ * @param branchNames - registry-resolved child and target branch names.
  * @returns the parent-ready user message.
  */
 export function buildMergeCheckpoint(
   checkpointMessage: UserMessage,
   provenance: MergeProvenance,
+  branchNames: MergeBranchNames,
 ): UserMessage {
-  const source: MergeCheckpointSource = {
-    kind: 'plugin',
-    plugin: 'compact',
-    compactionId: provenance.compactionId,
-    ...(provenance.sourceCommandId === undefined ? {} : { sourceCommandId: provenance.sourceCommandId }),
-    childSessionId: provenance.childSessionId,
-    atSeq: provenance.atSeq,
-    shadowedRange: provenance.shadowedRange,
-    shadowedSeqs: [...provenance.shadowedSeqs],
-  }
-  return createUserMessage({
-    content: checkpointMessage.content,
-    source,
-  })
+  const payload = checkpointMessage.content
+    .map(block => block.type === 'text' ? block.text : `(opaque ${block.type} block)`)
+    .join('\n')
+  return buildBranchEnvelope(
+    {
+      kind: 'squash',
+      from: branchNames.child,
+      to: branchNames.target,
+      ...provenance.turnRange === undefined ? {} : { range: { ...provenance.turnRange } },
+      fromSessionId: provenance.childSessionId,
+    },
+    payload,
+    undefined,
+    {
+      plugin: 'compact',
+      compactionId: provenance.compactionId,
+      ...(provenance.sourceCommandId === undefined ? {} : { sourceCommandId: provenance.sourceCommandId }),
+      childSessionId: provenance.childSessionId,
+      atSeq: provenance.atSeq,
+      shadowedRange: provenance.shadowedRange,
+      shadowedSeqs: [...provenance.shadowedSeqs],
+    },
+  )
 }
 
 /** Fail loudly if a locally closed union gains an unhandled member. */
