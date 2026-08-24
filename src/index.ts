@@ -25,7 +25,8 @@ import { loadRegistry } from './registry.js'
 import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
 import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
 import { executeSquashAction, parseSquashAction } from './squash-command.js'
-import type { SquashAgent } from './squash-command.js'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SquashChildAgent } from './squash-command.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { compactNow } from './vendor/compact.js'
@@ -428,7 +429,7 @@ export async function apply(ctx: Context): Promise<void> {
         squash: {
           async resolveChildAgent(sessionId) {
             const live = ctx.agents.get(sessionId as Session['id'])
-            if (live !== undefined) return live as SquashAgent
+            if (live !== undefined) return live as SquashChildAgent
             // `null` is reserved for a session that does not exist at all;
             // an existing-but-unresolvable session (a resume I/O failure,
             // for instance) propagates its real error instead of being
@@ -436,14 +437,14 @@ export async function apply(ctx: Context): Promise<void> {
             if (!(await sessionExists(ctx, sessionId))) return null
             return getOrResumeAgent(
               getOrResumeDeps(ctx), sessionId as Session['id'],
-            ) as Promise<SquashAgent>
+            ) as Promise<SquashChildAgent>
           },
           openStore: (workspaceKey) =>
             createDomainStore(domain as unknown as DomainLike, workspaceKey),
           compact: (agent, signal, request) =>
             compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
           resolveParentAgent: (sessionId) =>
-            getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<SquashAgent>,
+            getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
           flush: (agent) => ctx.sessions.flush(agent.session),
         },
       }
@@ -456,14 +457,14 @@ export async function apply(ctx: Context): Promise<void> {
         const workspaceKey = invocation.agent.session.header.cwd ?? ''
         const operation = Promise.resolve(
           executeSquashAction(parseSquashAction(invocation.rawInput), {
-            childAgent: invocation.agent as SquashAgent,
+            childAgent: invocation.agent as SquashChildAgent,
             signal: invocation.signal,
             ...invocation.commandId === undefined ? {} : { commandId: invocation.commandId },
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             compact: (agent, signal, request) =>
               compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
             resolveParentAgent: (sessionId) =>
-              getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<SquashAgent>,
+              getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
             flush: (agent) => ctx.sessions.flush(agent.session),
           }),
         ) as Promise<CommandResult>

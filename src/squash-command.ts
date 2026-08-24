@@ -1,7 +1,7 @@
 /**
  * `/squash` command: argument parsing and the execution pipeline that runs
  * the vendored compaction engine over the child's post-fork region and
- * appends the merge checkpoint into the parent branch. Pure and
+ * queues the merge checkpoint into the parent branch via `agent.inject`. Pure and
  * cordis-free, mirroring command.ts: the plugin shell in index.ts feeds a
  * parsed action plus {@link SquashCommandDeps}; everything here is
  * unit-testable with fake agents.
@@ -54,17 +54,17 @@ export function parseSquashAction(rawInput: string): SquashAction {
 }
 
 /**
- * The agent shape squash needs: the public `Agent` plus the runtime phase
- * marker the agent-loop implementation carries (the public interface hides
- * it, but `runMaintenance`'s idle contract makes `phase.kind` the honest
- * fast gate for both the child and the parent).
+ * The child agent shape squash needs: the public `Agent` plus the runtime
+ * phase marker the agent-loop implementation carries. ONLY the child idle
+ * gate needs this internal reach (the vendored `runMaintenance` idle
+ * contract); the parent is delivered to through the public interface alone.
  */
-export type SquashAgent = Agent & { readonly phase: { readonly kind: string } }
+export type SquashChildAgent = Agent & { readonly phase: { readonly kind: string } }
 
 /** Capabilities one `/squash` execution needs. */
 export interface SquashCommandDeps {
   /** The child agent this command runs against (idle, per the command contract). */
-  readonly childAgent: SquashAgent
+  readonly childAgent: SquashChildAgent
   /** Cancellation signal owned by the dispatching UI request. */
   readonly signal: AbortSignal
   /** This command's identity, recorded in the merge provenance. */
@@ -78,7 +78,7 @@ export interface SquashCommandDeps {
     request: CompactRegionRequest,
   ) => Promise<CompactionResult>
   /** Parent-side agent resolution (vendored ensureSession kernel). */
-  readonly resolveParentAgent: (sessionId: string) => Promise<SquashAgent>
+  readonly resolveParentAgent: (sessionId: string) => Promise<Agent>
   /** Durability checkpoint for one agent's session (`ctx.sessions.flush`). */
   readonly flush: (agent: Agent) => Promise<unknown>
 }
@@ -106,7 +106,7 @@ export async function executeSquashAction(
  * The squash pipeline proper (issue #8: extracted so the RPC `squash`
  * endpoint reuses the exact command semantics): idle gate, lineage,
  * registry target check, post-fork range, vendored compaction, merge
- * checkpoint append into the parent, durability flush. Pure over the
+ * checkpoint queue delivery into the parent, durability flush. Pure over the
  * injected agents and capabilities — never throws business failures.
  */
 export async function executeSquash(
@@ -210,7 +210,7 @@ export async function executeSquash(
     throw error
   }
 
-  let parentAgent: SquashAgent
+  let parentAgent: Agent
   try {
     parentAgent = await deps.resolveParentAgent(parentSessionId)
   } catch (error) {
@@ -219,14 +219,14 @@ export async function executeSquash(
       text: `could not open the parent branch's session: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
-  if (parentAgent.phase.kind !== 'idle') {
-    return {
-      kind: 'error',
-      text: 'the parent branch\'s agent is busy — retry /squash once it goes idle',
-    }
-  }
 
-  parentAgent.session.append('user/message', mergeMessage, { surfaceOp: 'append' })
+  // Queue delivery (issue #27): `inject` parks the envelope in the parent's
+  // inbox for the next pre-step without waking the driver — the same public
+  // path other plugins use (agent-teams rides steer/followup on this very
+  // interface). Squash takes no responsibility for parent busyness: a busy
+  // parent claims the message at its next step boundary, an idle one at its
+  // next wake. The inbox splice is a durable session event, hence the flush.
+  parentAgent.inject(mergeMessage)
   await deps.flush(parentAgent)
 
   return {

@@ -109,13 +109,18 @@ function fakeSession(header: Partial<SessionHeader>, rawEvents: unknown[], surfa
   return session as unknown as Session
 }
 
-/** A fake agent whose runMaintenance mirrors the idle-claim/restore protocol. */
-function fakeAgent(session: Session): Agent {
+/** A fake agent whose runMaintenance mirrors the idle-claim/restore protocol and whose `inject` records queued context. */
+function fakeAgent(session: Session): Agent & { injected: UserMessage[] } {
+  const injected: UserMessage[] = []
   const agent = {
     session,
     id: (session as unknown as { id: string }).id,
     options: {},
     phase: { kind: 'idle' },
+    injected,
+    inject(message: UserMessage) {
+      injected.push(message)
+    },
     runMaintenance(job: (signal: AbortSignal) => Promise<unknown>) {
       const phase = agent.phase as { kind: string }
       if (phase.kind !== 'idle') throw new Error(`agent already has active work`)
@@ -284,7 +289,9 @@ describe('squash e2e: full /squash pipeline into the parent', () => {
       ],
       [0, 1],
     )
+    // Snapshot captured before delivery: the parent's own log stays intact.
     const parentSnapshot = JSON.stringify(parent.events)
+    const parentAgent = fakeAgent(parent)
     const state: BranchRegistryState = {
       branches: {
         main: { name: 'main', sessionId: 'session-parent', forkOrigin: null },
@@ -299,20 +306,22 @@ describe('squash e2e: full /squash pipeline into the parent', () => {
         commandId: 'cmd-1' as CommandId,
         store: { load: async () => state, save: async () => { } },
         compact: async () => compaction,
-        resolveParentAgent: async () => fakeAgent(parent) as never,
+        resolveParentAgent: async () => parentAgent as never,
         flush: async () => { },
       },
     )
-    return { result: JSON.stringify(commandResult), parent, child, compaction }
+    return { result: JSON.stringify(commandResult), parent, parentAgent, parentSnapshot, child, compaction }
   }
 
-  test('acceptance #2: parent growth is bounded by exactly one appended checkpoint', async () => {
-    const { result, parent } = await runPipeline()
+  test('acceptance #2: parent growth is bounded by exactly one queued checkpoint', async () => {
+    const { result, parent, parentAgent, parentSnapshot } = await runPipeline()
     expect(JSON.parse(result as string).kind).toBe('success')
-    expect(parent.surface.nodes.length).toBe(3)
-    const appended = parent.events[2] as unknown as { type: string; data: UserMessage }
-    expect(appended.type).toBe('user/message')
-    expect(isCompactCheckpointSource(appended.data.source)).toBe(true)
+    // The parent's own log is untouched — delivery queues in the inbox.
+    expect(JSON.stringify(parent.events)).toBe(parentSnapshot)
+    expect(parent.surface.nodes).toEqual([0, 1])
+    // Exactly one envelope was queued, still a recognized checkpoint.
+    expect(parentAgent.injected.length).toBe(1)
+    expect(isCompactCheckpointSource(parentAgent.injected[0]!.source)).toBe(true)
   })
 
   test('acceptance #5 (parent): the parent log replays to a complete, valid request', async () => {
