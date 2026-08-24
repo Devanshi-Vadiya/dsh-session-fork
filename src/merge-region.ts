@@ -34,7 +34,7 @@ import {
   toolPairingBalancedBefore,
 } from '@deepseek-ai/dsh-compaction'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { postForkRange } from './squash.js'
+import { postForkRange, SquashCoreError } from './squash.js'
 import type { RegistryState } from './types.js'
 
 /** How the target relates to the source's lineage for one merge region. */
@@ -175,18 +175,21 @@ function regionFromPostFork(
     const { start, end } = postForkRange(session)
     return { kind: 'ok', start, end, relation, lcaSessionId }
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith('squash:')) {
-      return { kind: 'error', code: mapPostForkCode(error.message), message: error.message }
+    if (error instanceof SquashCoreError) {
+      return { kind: 'error', code: mapPostForkCode(error.code), message: error.message }
     }
     throw error
   }
 }
 
-/** Map postForkRange's message to its stable code for error consumers. */
-function mapPostForkCode(message: string): MergeRegionError['code'] {
-  if (message.includes('no seed boundary')) return 'missing-seed-boundary'
-  if (message.includes('no post-fork surface region')) return 'empty-region'
-  return 'unbalanced-range'
+/** Map postForkRange's stable error code to its merge-region counterpart. */
+function mapPostForkCode(code: SquashCoreError['code']): MergeRegionError['code'] {
+  switch (code) {
+    case 'missing-seed-boundary': return 'missing-seed-boundary'
+    case 'empty-fork-range': return 'empty-region'
+    case 'unbalanced-range': return 'unbalanced-range'
+    case 'checkpoint-not-found': return 'empty-region'
+  }
 }
 
 /** Region of all source surface nodes strictly after `boundarySeq`. */
