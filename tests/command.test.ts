@@ -27,7 +27,11 @@ const LOG: readonly string[] = [
 ]
 
 function sessionOf(id: string): SourceSessionView {
-  const events: SourceEvent[] = LOG.map((type, seq) => ({ seq, type }))
+  let turn = 0
+  const events: SourceEvent[] = LOG.map((type, seq) => {
+    if (type === 'turn/start') turn += 1
+    return type === 'turn/end' ? { seq, type, data: { turn } } : { seq, type }
+  })
   return { id, events, header: { cwd: '/w' } }
 }
 
@@ -52,16 +56,19 @@ interface Harness {
   readonly store: ReturnType<typeof memoryStore>
   readonly children: string[]
   readonly renames: Array<{ sessionId: string; title: string }>
+  readonly notifications: Array<{ parentSessionId: string; text: string; summary: string }>
 }
 
 function harness(): Harness {
   const store = memoryStore()
   const children: string[] = []
   const renames: Array<{ sessionId: string; title: string }> = []
+  const notifications: Harness['notifications'] = []
   return {
     store,
     children,
     renames,
+    notifications,
     deps: {
       currentSessionId: 's-parent',
       store,
@@ -80,6 +87,13 @@ function harness(): Harness {
         async renameSession(sessionId, title) {
           renames.push({ sessionId, title })
         },
+      },
+      async notifyForked(parentSessionId, notice) {
+        notifications.push({
+          parentSessionId,
+          text: (notice.content[0] as { type: 'text'; text: string }).text,
+          summary: notice.source.kind === 'plugin' ? notice.source.summary : '',
+        })
       },
     },
   }
@@ -140,6 +154,30 @@ describe('executeBranchAction', () => {
       parentSessionId: 's-parent',
       atSeq: 7,
     })
+  })
+
+  test('create notifies the parent branch through the never-throw channel', async () => {
+    // Issue #28: a successful create delivers a one-line fork notice into
+    // the parent session AFTER the registry write, naming branch and turn.
+    const h = harness()
+    await executeBranchAction(parseBranchAction('review'), h.deps)
+    expect(h.notifications).toEqual([{
+      parentSessionId: 's-parent',
+      text: 'Branch "review" forked from you at turn 2.',
+      summary: 'fork: s-parent → review',
+    }])
+  })
+
+  test('the parent notice names the registry branch when the source is adopted', async () => {
+    const h = harness()
+    await executeBranchAction(parseBranchAction('adopt main'), h.deps)
+    await executeBranchAction(parseBranchAction('review'), h.deps)
+    expect(h.notifications).toHaveLength(1)
+    expect(h.notifications[0]!.text).toBe('Branch "review" forked from you at turn 2.')
+    // The fork facts (issue #28) resolved the registry name "main" — the
+    // summary's `from` proves the seed notice named the branch, not the id.
+    expect(h.notifications[0]!.summary).toBe('fork: main → review')
+    // adopt itself is a root record: no parent session, no notification.
   })
 
   test('duplicate name is a clear error and registry is unchanged', async () => {
