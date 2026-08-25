@@ -119,8 +119,8 @@ export async function executeSquash(
     return { kind: 'error', text: squashErrorText('busy') }
   }
 
-  // Lineage: squash runs from a forked child and merges into the branch
-  // that owns the child's parent session.
+  // Lineage (commit A, unchanged semantics): squash runs from a forked
+  // child and merges into the branch that owns the child's parent session.
   const childSession = deps.childAgent.session as Session
   const parentSessionId = childSession.header.parentSession
   if (parentSessionId === undefined) {
@@ -144,20 +144,12 @@ export async function executeSquash(
     }
   }
 
-  // Fork anchor for the merge provenance: the child's own registry record
-  // first, then the durable header lineage (seedLength anchors one past the
-  // parent's turn-end seq, so atSeq = seedLength - 1).
-  const childRecord = Object.values(state.branches)
-    .find(record => record.sessionId === childSession.id)
-  const atSeq = childRecord?.forkOrigin?.atSeq
-    ?? (childSession.header.seedLength !== undefined ? childSession.header.seedLength - 1 : undefined)
-  if (atSeq === undefined) {
-    return { kind: 'error', text: 'cannot determine the fork anchor for merge provenance' }
-  }
   // Branch names are point-in-time facts: resolve them from the registry now,
   // before building the merge envelope. The target is the registry key the
   // user named; the child must be a registered branch to be named in the
   // AI-visible provenance.
+  const childRecord = Object.values(state.branches)
+    .find(record => record.sessionId === childSession.id)
   const childName = childRecord?.name
   if (childName === undefined) {
     return {
@@ -192,7 +184,6 @@ export async function executeSquash(
   let mergeMessage
   const provenance: MergeProvenance = {
     childSessionId: childSession.id,
-    atSeq,
     shadowedRange: result.shadowedRange,
     shadowedSeqs: result.shadowedSeqs,
     turnRange: turnRangeOf(childSession, result.shadowedSeqs),

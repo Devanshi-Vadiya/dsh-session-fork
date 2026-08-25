@@ -24,7 +24,7 @@
  *
  * - 2026-08-22 extension: both builders accept `extraSource` — caller-owned
  *   fields spread onto the message `source` AFTER `branchEvent` (e.g.
- *   MergeCheckpointSource's childSessionId/atSeq/shadowedRange/...).
+ *   MergeCheckpointSource's childSessionId/shadowedRange/...).
  *   Optional: existing callers and wire shapes are unchanged.
  * Pure text construction, no cordis, no I/O — unit-testable with plain
  * assertions, mirroring the purity discipline of `squash.ts`.

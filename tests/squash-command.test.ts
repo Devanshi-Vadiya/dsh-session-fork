@@ -191,7 +191,6 @@ describe('executeSquashAction', () => {
     const source = injected.source as Record<string, unknown>
     expect(isCompactCheckpointSource(injected.source)).toBe(true)
     expect(source.childSessionId).toBe('session-child')
-    expect(source.atSeq).toBe(1) // seedLength 2 anchors one past the turn end
     expect(source.shadowedSeqs).toEqual([2, 3])
     expect(source.compactionId).toBe('compaction-1')
 
@@ -258,25 +257,6 @@ describe('executeSquashAction', () => {
     expect(flushed[0]).toBe(busyParent)
   })
 
-  test('a missing fork anchor is rejected before compaction', async () => {
-    const child = fakeAgent(
-      fakeSession(
-        { parentSession: 'session-parent', id: 'session-child' },
-        [
-          { type: 'user/message' },
-          { type: 'session/end-seed' },
-          { type: 'user/message' },
-          { type: 'user/message', data: { message: checkpointUserMessage('compaction-1', 'x') } },
-        ],
-        [0, 2, 3],
-      ),
-      'idle',
-    )
-    const { deps } = makeDefs({ childAgent: child, store: memoryStore({ branches: { main: MAIN_RECORD } }) })
-    const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
-    expect(result.kind === 'error' && result.text).toContain('fork anchor')
-  })
-
   test('an unregistered child session is rejected before compaction', async () => {
     const child = fakeAgent(
       fakeSession(
@@ -293,24 +273,5 @@ describe('executeSquashAction', () => {
     const { deps } = makeDefs({ childAgent: child, store: memoryStore({ branches: { main: MAIN_RECORD } }) })
     const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
     expect(result.kind === 'error' && result.text).toContain('branch name')
-  })
-
-  test('the child registry record wins over the header fallback for atSeq', async () => {
-    const { deps, parentAgent } = makeDefs({
-      store: memoryStore({
-        branches: {
-          main: MAIN_RECORD,
-          review: {
-            name: 'review',
-            sessionId: 'session-child',
-            forkOrigin: { parentSessionId: 'session-parent', atSeq: 7 },
-          },
-        },
-      }),
-    })
-    const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
-    expect(result.kind).toBe('success')
-    const injected = parentAgent.injected[0]!
-    expect((injected.source as Record<string, unknown>).atSeq).toBe(7)
   })
 })

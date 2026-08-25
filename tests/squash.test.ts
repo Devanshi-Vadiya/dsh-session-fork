@@ -236,7 +236,6 @@ describe('buildMergeCheckpoint', () => {
   test('wraps the checkpoint payload in the squash envelope, keeping the compaction checkpoint marker', () => {
     const merged = buildMergeCheckpoint(checkpoint, {
       childSessionId: 'session-child' as Session['id'],
-      atSeq: 41,
       shadowedRange: { start: 3, end: 9 },
       shadowedSeqs: [3, 4, 9],
       // Deliberately different numbers from shadowedRange: the preamble and
@@ -257,7 +256,9 @@ describe('buildMergeCheckpoint', () => {
     expect(source.kind).toBe('plugin')
     expect(source.plugin).toBe('compact')
     expect(source.childSessionId).toBe('session-child')
-    expect(source.atSeq).toBe(41)
+    // The fork anchor atSeq is deliberately gone (issue #21): a single seq
+    // cannot point at a turn under any-two-branch squash semantics.
+    expect('atSeq' in source).toBe(false)
     expect(source.shadowedRange).toEqual({ start: 3, end: 9 })
     expect(source.shadowedSeqs).toEqual([3, 4, 9])
     expect(source.compactionId).toBe(CompactionId('child-compaction'))
@@ -274,7 +275,6 @@ describe('buildMergeCheckpoint', () => {
   test('omits the range clause when no turn range is known', () => {
     const merged = buildMergeCheckpoint(checkpoint, {
       childSessionId: 'session-child' as Session['id'],
-      atSeq: 41,
       shadowedRange: { start: 3, end: 9 },
       shadowedSeqs: [3, 4, 9],
       compactionId: CompactionId('child-compaction'),
@@ -295,7 +295,6 @@ describe('buildMergeCheckpoint', () => {
     })
     const merged = buildMergeCheckpoint(mixed, {
       childSessionId: 'session-child' as Session['id'],
-      atSeq: 41,
       shadowedRange: { start: 3, end: 9 },
       shadowedSeqs: [3, 4, 9],
       compactionId: CompactionId('child-compaction'),
@@ -307,7 +306,6 @@ describe('buildMergeCheckpoint', () => {
   test('records the initiating command id when present', () => {
     const merged = buildMergeCheckpoint(checkpoint, {
       childSessionId: 'session-child' as Session['id'],
-      atSeq: 41,
       shadowedRange: { start: 3, end: 9 },
       shadowedSeqs: [3, 4, 9],
       compactionId: CompactionId('child-compaction'),
