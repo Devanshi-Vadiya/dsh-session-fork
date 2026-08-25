@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { branchCommandDefinition, squashCommandDefinition } from '../src/index.js'
+import { branchCommandDefinition, rebasedIntoCommandDefinition, squashCommandDefinition } from '../src/index.js'
 
 describe('branchCommandDefinition', () => {
   test('registers under the name "branch"', () => {
@@ -42,5 +42,21 @@ describe('squashCommandDefinition', () => {
 
   test('hint mentions the into form', () => {
     expect(squashCommandDefinition.input?.hint).toContain('into')
+  })
+})
+
+describe('rebasedIntoCommandDefinition', () => {
+  test('registers under the name "rebased"', () => {
+    expect(rebasedIntoCommandDefinition.name).toBe('rebased')
+  })
+
+  test('exposes a non-empty input hint so argued slash-lines reach the handler', () => {
+    const hint = rebasedIntoCommandDefinition.input?.hint
+    expect(typeof hint).toBe('string')
+    expect(hint?.length ?? 0).toBeGreaterThan(0)
+  })
+
+  test('hint mentions the into form (squash-aligned phrasing)', () => {
+    expect(rebasedIntoCommandDefinition.input?.hint).toContain('into')
   })
 })

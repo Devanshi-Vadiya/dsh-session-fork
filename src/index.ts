@@ -26,8 +26,8 @@ import { forkSeedNoticeEvent } from './branch.js'
 import { loadRegistry, saveRegistry } from './registry.js'
 import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
 import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
-import { executeRebaseAction, parseRebaseAction } from './rebase-command.js'
-import type { RebaseAgent } from './rebase-command.js'
+import { executeRebasedIntoAction, parseRebasedIntoAction } from './rebased-into-command.js'
+import type { RebasedIntoAgent } from './rebased-into-command.js'
 import { executeSquashAction, parseSquashAction } from './squash-command.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SquashChildAgent } from './squash-command.js'
@@ -88,11 +88,11 @@ export type {
   RpcResult,
 } from './rpc.js'
 export {
-  REBASE_USAGE,
-  executeRebaseAction,
-  parseRebaseAction,
-} from './rebase-command.js'
-export type { RebaseAction, RebaseCommandDeps } from './rebase-command.js'
+  REBASED_INTO_USAGE,
+  executeRebasedIntoAction,
+  parseRebasedIntoAction,
+} from './rebased-into-command.js'
+export type { RebasedIntoAction, RebasedIntoCommandDeps } from './rebased-into-command.js'
 export { mergeRegion } from './merge-region.js'
 export type {
   MergeRegion,
@@ -349,14 +349,14 @@ export const squashCommandDefinition = {
 } as const
 
 /**
- * The `/rebase` command definition registered by {@link apply}. The `input`
+ * The `/rebased` command definition registered by {@link apply}. The `input`
  * hint is load-bearing for the same bare-command reason as above: without it
- * the web client treats `/rebase <branch>` as a plain message to the model.
+ * the web client treats `/rebased into <branch>` as a plain message to the model.
  */
-export const rebaseCommandDefinition = {
-  name: 'rebase',
+export const rebasedIntoCommandDefinition = {
+  name: 'rebased',
   description: 'Transfer this branch\'s own conversation verbatim into any branch',
-  input: { hint: '<branch>' },
+  input: { hint: 'into <branch>' },
 } as const
 
 /**
@@ -536,22 +536,22 @@ export async function apply(ctx: Context): Promise<void> {
       },
     })
 
-    // /rebase (issue #4, docs/design/rebase.md): verbatim transcript of this
+    // /rebased into (issue #4, docs/design/rebased-into.md): verbatim transcript of this
     // branch's own conversation into an ARBITRARY target branch's inbox —
     // target resolution is the same vendored ensureSession kernel as squash
     // (resume, never create), but there is no busy gate and no compaction:
     // the transport is `agent.inject` (next-step, no wake), so a running
     // target claims the transcript at its nearest step boundary.
     yield ctx.commands.register({
-      ...rebaseCommandDefinition,
+      ...rebasedIntoCommandDefinition,
       handler: (invocation: CommandInvocation): Promise<CommandResult> => {
         const workspaceKey = invocation.agent.session.header.cwd ?? ''
         const operation = Promise.resolve(
-          executeRebaseAction(parseRebaseAction(invocation.rawInput), {
-            sourceAgent: invocation.agent as RebaseAgent,
+          executeRebasedIntoAction(parseRebasedIntoAction(invocation.rawInput), {
+            sourceAgent: invocation.agent as RebasedIntoAgent,
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             resolveTargetAgent: (sessionId) =>
-              getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<RebaseAgent>,
+              getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<RebasedIntoAgent>,
             flush: (agent) => ctx.sessions.flush(agent.session),
           }),
         ) as Promise<CommandResult>

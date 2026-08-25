@@ -1,16 +1,16 @@
 /**
- * Pure rebase logic: serialize the source branch's post-fork surface region
+ * Pure rebased-into logic: serialize the source branch's post-fork surface region
  * into a verbatim transcript for the shared branch-event envelope.
  *
  * The region itself is decided by `mergeRegion()` (see merge-region.ts) so
- * squash, merge, and rebase can never disagree about what "this branch's
+ * squash, merge, and rebased-into can never disagree about what "this branch's
  * own conversation" means. This module only owns the rendering half:
  * turning derived messages into a human-readable transcript that preserves
  * order, reasoning, tool calls, and tool results — never truncated, never
  * dropped. Opaque plugin blocks state their type instead of vanishing.
  *
  * No cordis, no I/O — unit-testable with fake session objects, mirroring the
- * purity discipline of squash.ts. See docs/design/rebase.md for the design
+ * purity discipline of squash.ts. See docs/design/rebased-into.md for the design
  * contract this implements (2026-08-23).
  * @module dsh-session-fork/src/rebase
  */

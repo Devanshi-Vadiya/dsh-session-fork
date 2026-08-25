@@ -3,15 +3,15 @@
  * over fake agents/sessions and a memory registry store, no cordis. The
  * load-bearing assertions: NO busy gate on the target (issue #27 sibling
  * semantics), transport is `inject`, source is never mutated.
- * @module dsh-session-fork/tests/rebase-command.test
+ * @module dsh-session-fork/tests/rebased-into-command.test
  */
 
 import { describe, expect, test } from 'bun:test'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import { executeRebaseAction, parseRebaseAction } from '../src/rebase-command.js'
-import type { RebaseAgent, RebaseCommandDeps } from '../src/rebase-command.js'
+import { executeRebasedIntoAction, parseRebasedIntoAction } from '../src/rebased-into-command.js'
+import type { RebasedIntoAgent, RebasedIntoCommandDeps } from '../src/rebased-into-command.js'
 import type { RegistryState, RegistryStore } from '../src/types.js'
 
 /** One raw fake log event; its array index becomes its seq. */
@@ -35,12 +35,12 @@ function fakeSession(header: Partial<SessionHeader>, rawEvents: readonly FakeEve
 }
 
 /** A fake agent recording inject calls; phase kind is configurable. */
-function fakeAgent(session: Session, phaseKind: string, injected: UserMessage[]): RebaseAgent {
+function fakeAgent(session: Session, phaseKind: string, injected: UserMessage[]): RebasedIntoAgent {
   return {
     session,
     phase: { kind: phaseKind },
     inject: (message: UserMessage) => { injected.push(message) },
-  } as unknown as RebaseAgent
+  } as unknown as RebasedIntoAgent
 }
 
 function memoryStore(initial: RegistryState): RegistryStore {
@@ -98,7 +98,7 @@ function sourceFixture(): Session {
 }
 
 /** Default deps: idle source, resolving target, recording flush calls. */
-function depsFixture(source: RebaseAgent, target: RebaseAgent, flushed: unknown[]): RebaseCommandDeps {
+function depsFixture(source: RebasedIntoAgent, target: RebasedIntoAgent, flushed: unknown[]): RebasedIntoCommandDeps {
   return {
     sourceAgent: source,
     store: memoryStore(registryFixture()),
@@ -107,36 +107,37 @@ function depsFixture(source: RebaseAgent, target: RebaseAgent, flushed: unknown[
   }
 }
 
-describe('parseRebaseAction', () => {
-  test('accepts a bare branch name', () => {
-    expect(parseRebaseAction(' main ')).toEqual({ kind: 'rebase', target: 'main' })
+describe('parseRebasedIntoAction', () => {
+  test('accepts the squash-aligned `into <branch>` phrasing', () => {
+    expect(parseRebasedIntoAction('into main')).toEqual({ kind: 'rebased-into', target: 'main' })
+    expect(parseRebasedIntoAction(' into  main ')).toEqual({ kind: 'rebased-into', target: 'main' })
   })
-  test('accepts squash-compatible `into <branch>` phrasing', () => {
-    expect(parseRebaseAction('into main')).toEqual({ kind: 'rebase', target: 'main' })
+  test('usage on a bare branch name (the target must be introduced by into)', () => {
+    expect(parseRebasedIntoAction(' main ').kind).toBe('usage')
   })
   test('usage on empty input', () => {
-    expect(parseRebaseAction('  ').kind).toBe('usage')
+    expect(parseRebasedIntoAction('  ').kind).toBe('usage')
   })
   test('usage on extra arguments', () => {
-    expect(parseRebaseAction('main extra').kind).toBe('usage')
+    expect(parseRebasedIntoAction('main extra').kind).toBe('usage')
   })
 })
 
-describe('executeRebaseAction', () => {
+describe('executeRebasedIntoAction', () => {
   test('happy path: injects one envelope into the target, flushes, never touches the source', async () => {
     const injected: UserMessage[] = []
     const flushed: unknown[] = []
     const source = fakeAgent(sourceFixture(), 'idle', [])
     const target = fakeAgent(fakeSession({ id: TARGET_SESSION_ID }, []), 'idle', injected)
-    const result = await executeRebaseAction(
-      { kind: 'rebase', target: 'main' },
+    const result = await executeRebasedIntoAction(
+      { kind: 'rebased-into', target: 'main' },
       depsFixture(source, target, flushed),
     )
     expect(result.kind).toBe('success')
     expect(injected).toHaveLength(1)
     expect(flushed).toHaveLength(1)
     const text = (injected[0]!.content[0] as { text: string }).text
-    expect(text).toContain('<branch-rebase>')
+    expect(text).toContain('<branch-rebased-into>')
     expect(text).toContain('from branch "review"')
     expect(text).toContain('into branch "main"')
     expect(text).toContain('own prompt')
@@ -149,8 +150,8 @@ describe('executeRebaseAction', () => {
     const flushed: unknown[] = []
     const source = fakeAgent(sourceFixture(), 'idle', [])
     const busyTarget = fakeAgent(fakeSession({ id: TARGET_SESSION_ID }, []), 'running', injected)
-    const result = await executeRebaseAction(
-      { kind: 'rebase', target: 'main' },
+    const result = await executeRebasedIntoAction(
+      { kind: 'rebased-into', target: 'main' },
       depsFixture(source, busyTarget, flushed),
     )
     expect(result.kind).toBe('success')
@@ -161,8 +162,8 @@ describe('executeRebaseAction', () => {
     const injected: UserMessage[] = []
     const source = fakeAgent(sourceFixture(), 'running', [])
     const target = fakeAgent(fakeSession({ id: TARGET_SESSION_ID }, []), 'idle', injected)
-    const result = await executeRebaseAction(
-      { kind: 'rebase', target: 'main' },
+    const result = await executeRebasedIntoAction(
+      { kind: 'rebased-into', target: 'main' },
       depsFixture(source, target, []),
     )
     expect(result.kind).toBe('error')
@@ -172,20 +173,20 @@ describe('executeRebaseAction', () => {
   test('unknown target branch', async () => {
     const source = fakeAgent(sourceFixture(), 'idle', [])
     const target = fakeAgent(fakeSession({ id: TARGET_SESSION_ID }, []), 'idle', [])
-    const result = await executeRebaseAction(
-      { kind: 'rebase', target: 'nope' },
+    const result = await executeRebasedIntoAction(
+      { kind: 'rebased-into', target: 'nope' },
       depsFixture(source, target, []),
     )
     expect(result.kind).toBe('error')
     expect((result as { text: string }).text).toContain("no branch named 'nope'")
   })
 
-  test('cannot rebase a branch into itself', async () => {
+  test('a branch cannot be rebased into itself', async () => {
     const source = fakeAgent(sourceFixture(), 'idle', [])
     const target = fakeAgent(fakeSession({ id: TARGET_SESSION_ID }, []), 'idle', [])
     const deps = depsFixture(source, target, [])
-    const result = await executeRebaseAction(
-      { kind: 'rebase', target: 'review' },
+    const result = await executeRebasedIntoAction(
+      { kind: 'rebased-into', target: 'review' },
       { ...deps, store: memoryStore(registryFixture()) },
     )
     expect(result.kind).toBe('error')
@@ -196,8 +197,8 @@ describe('executeRebaseAction', () => {
     const root = fakeSession({ id: 'session-root' }, [])
     const source = fakeAgent(root, 'idle', [])
     const target = fakeAgent(fakeSession({ id: TARGET_SESSION_ID }, []), 'idle', [])
-    const result = await executeRebaseAction(
-      { kind: 'rebase', target: 'main' },
+    const result = await executeRebasedIntoAction(
+      { kind: 'rebased-into', target: 'main' },
       depsFixture(source, target, []),
     )
     expect(result.kind).toBe('error')
@@ -238,8 +239,8 @@ describe('executeRebaseAction', () => {
     const injected: UserMessage[] = []
     const source = fakeAgent(draft, 'idle', injected)
     const target = fakeAgent(fakeSession({ id: TARGET_SESSION_ID }, []), 'idle', [])
-    const result = await executeRebaseAction(
-      { kind: 'rebase', target: 'main' },
+    const result = await executeRebasedIntoAction(
+      { kind: 'rebased-into', target: 'main' },
       { ...depsFixture(source, target, injected), store: memoryStore(state) },
     )
     expect(result.kind).toBe('success')

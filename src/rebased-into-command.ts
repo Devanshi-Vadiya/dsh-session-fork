@@ -1,17 +1,17 @@
 /**
- * `/rebase` command: argument parsing and the execution pipeline that
+ * `/rebased into` command: argument parsing and the execution pipeline that
  * serializes this branch's post-fork conversation (verbatim, including
  * tool-use and thinking) and injects it into an arbitrary target branch's
  * inbox through the shared branch-event envelope. Pure and cordis-free,
  * mirroring squash-command.ts: the plugin shell in index.ts feeds a parsed
- * action plus {@link RebaseCommandDeps}; unit-testable with fake agents.
+ * action plus {@link RebasedIntoCommandDeps}; unit-testable with fake agents.
  *
- * Transport contract (docs/design/rebase.md): the target is NEVER busy-gated
+ * Transport contract (docs/design/rebased-into.md): the target is NEVER busy-gated
  * — `inject` queues durably (next-step, no wake), so a running target claims
  * the transcript at its nearest step boundary and an idle one holds it until
  * its next turn. That is the whole point of rebase-via-inbox (issue #27
  * sibling semantics).
- * @module dsh-session-fork/src/rebase-command
+ * @module dsh-session-fork/src/rebased-into-command
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -20,57 +20,57 @@ import { buildBranchEnvelope } from './branch-events.js'
 import type { BranchEventFacts } from './branch-events.js'
 import type { BranchCommandResult } from './command.js'
 import { mergeRegion } from './merge-region.js'
-import { serializeTranscript } from './rebase.js'
+import { serializeTranscript } from './rebased-into.js'
 import { getBranch, loadRegistry } from './registry.js'
 import type { RegistryStore } from './types.js'
 
-export const REBASE_USAGE = [
+export const REBASED_INTO_USAGE = [
   'Usage:',
-  '  /rebase <branch>   transfer this branch\'s own conversation verbatim into <branch>',
+  '  /rebased into <branch>   transfer this branch\'s own conversation verbatim into <branch>',
 ].join('\n')
 
-/** One parsed `/rebase` invocation. */
-export type RebaseAction =
-  | { readonly kind: 'rebase'; readonly target: string }
+/** One parsed `/rebased into` invocation. */
+export type RebasedIntoAction =
+  | { readonly kind: 'rebased-into'; readonly target: string }
   | { readonly kind: 'usage'; readonly problem: string }
 
 /**
- * Parse the text after `/rebase`. Never throws; anything but a single branch
- * name becomes a `usage` action that renders {@link REBASE_USAGE}.
+ * Parse the text after `/rebased`. Never throws; anything but the exact
+ * `into <branch>` phrasing becomes a `usage` action that renders
+ * {@link REBASED_INTO_USAGE} — deliberately the same contract as squash.
  */
-export function parseRebaseAction(rawInput: string): RebaseAction {
+export function parseRebasedIntoAction(rawInput: string): RebasedIntoAction {
   const tokens = rawInput.trim().split(/\s+/).filter(t => t.length > 0)
   const [head, second] = tokens as [string | undefined, string | undefined]
   if (head === undefined) return { kind: 'usage', problem: 'missing target branch' }
-  if (head === 'into') {
-    // Squash-compatible phrasing: accept it, but only with one branch name.
-    if (second === undefined) return { kind: 'usage', problem: `'into' needs a branch name` }
-    if (tokens.length > 2) return { kind: 'usage', problem: `'into' takes exactly one branch name` }
-    return { kind: 'rebase', target: second }
+  // Squash-aligned contract: the target MUST be introduced by 'into'.
+  if (head !== 'into') {
+    return { kind: 'usage', problem: `expected 'into <branch>' (got '${head ?? ''}')` }
   }
-  if (tokens.length > 1) return { kind: 'usage', problem: `'${head}' takes no extra arguments` }
-  return { kind: 'rebase', target: head }
+  if (second === undefined) return { kind: 'usage', problem: `'into' needs a branch name` }
+  if (tokens.length > 2) return { kind: 'usage', problem: `'into' takes exactly one branch name` }
+  return { kind: 'rebased-into', target: second }
 }
 
 /**
- * The agent shape rebase needs: the public `Agent` (its `inject` is the
+ * The agent shape rebased-into needs: the public `Agent` (its `inject` is the
  * transport) plus the runtime phase marker for the SOURCE idle gate — the
  * command contract hands over an idle agent, and the gate keeps the honest
  * wording symmetric with squash. The TARGET is deliberately not gated.
  */
-export type RebaseAgent = Agent & {
+export type RebasedIntoAgent = Agent & {
   readonly phase: { readonly kind: string }
   readonly inject: (message: Parameters<Agent['inject']>[0]) => void
 }
 
 /** Capabilities one `/rebase` execution needs. */
-export interface RebaseCommandDeps {
+export interface RebasedIntoCommandDeps {
   /** The source agent this command runs against (idle, per the command contract). */
-  readonly sourceAgent: RebaseAgent
+  readonly sourceAgent: RebasedIntoAgent
   /** Per-workspace registry persistence. */
   readonly store: RegistryStore
   /** Target-side agent resolution (vendored ensureSession kernel: resume, never create). */
-  readonly resolveTargetAgent: (sessionId: string) => Promise<RebaseAgent>
+  readonly resolveTargetAgent: (sessionId: string) => Promise<RebasedIntoAgent>
   /** Durability checkpoint for one agent's session (`ctx.sessions.flush`). */
   readonly flush: (agent: Agent) => Promise<unknown>
 }
@@ -81,35 +81,35 @@ function unknownBranch(name: string): string {
 }
 
 /**
- * Execute one parsed `/rebase` action. All failures return `kind: 'error'`
+ * Execute one parsed `/rebased into` action. All failures return `kind: 'error'`
  * results — a command must never crash the host.
  */
-export async function executeRebaseAction(
-  action: RebaseAction,
-  deps: RebaseCommandDeps,
+export async function executeRebasedIntoAction(
+  action: RebasedIntoAction,
+  deps: RebasedIntoCommandDeps,
 ): Promise<BranchCommandResult> {
   if (action.kind === 'usage') {
-    return { kind: 'error', text: `${action.problem}\n${REBASE_USAGE}` }
+    return { kind: 'error', text: `${action.problem}\n${REBASED_INTO_USAGE}` }
   }
   return executeRebase(action.target, deps)
 }
 
 /**
- * The rebase pipeline proper: source idle gate, registry lookups (source
+ * The rebased-into pipeline proper: source idle gate, registry lookups (source
  * name by session id, target by name), post-fork region with the shared
  * squash gates, verbatim serialization, shared envelope, inbox injection
  * into the target, durability flush. The source session is never mutated —
- * rebase is a read on the source and a queue write on the target.
+ * rebased-into is a read on the source and a queue write on the target.
  */
 export async function executeRebase(
   target: string,
-  deps: RebaseCommandDeps,
+  deps: RebasedIntoCommandDeps,
 ): Promise<BranchCommandResult> {
   // Source idle gate: the command contract promises an idle agent; refuse
   // loudly if that contract is ever violated (a moving source would serialize
   // a region the agent is still appending to).
   if (deps.sourceAgent.phase.kind !== 'idle') {
-    return { kind: 'error', text: 'Rebase is unavailable while this branch is not idle.' }
+    return { kind: 'error', text: 'Rebased-into is unavailable while this branch is not idle.' }
   }
 
   const sourceSession = deps.sourceAgent.session as Session
@@ -122,7 +122,7 @@ export async function executeRebase(
     return { kind: 'error', text: unknownBranch(target) }
   }
   if (targetSessionId === sourceSession.id) {
-    return { kind: 'error', text: 'cannot rebase a branch into itself' }
+    return { kind: 'error', text: 'a branch cannot be rebased into itself' }
   }
 
   // The source branch's own registry name, resolved BEFORE building facts:
@@ -138,19 +138,19 @@ export async function executeRebase(
 
   // Lineage authority: any target goes (direct parent, distant relative, no
   // kinship); the region tracks what this branch carries that the target
-  // lacks. See docs/design/rebase.md §merge-region.
+  // lacks. See docs/design/rebased-into.md §merge-region.
   const region = mergeRegion(state, sourceSession, targetSessionId)
   if (region.kind === 'error') {
-    return { kind: 'error', text: region.message.replace(/^(?:squash|merge-region):/, 'rebase:') }
+    return { kind: 'error', text: region.message.replace(/^(?:squash|merge-region):/, 'rebased-into:') }
   }
 
   const transcript = serializeTranscript(sourceSession, region)
   if (transcript.nodeCount === 0) {
-    return { kind: 'error', text: 'rebase: this branch has no conversation of its own yet' }
+    return { kind: 'error', text: 'rebased-into: this branch has no conversation of its own yet' }
   }
 
   const facts: BranchEventFacts = {
-    kind: 'rebase',
+    kind: 'rebased-into',
     from: sourceRecord.name,
     to: target,
     ...transcript.turns.start !== undefined && transcript.turns.end !== undefined
@@ -160,7 +160,7 @@ export async function executeRebase(
   }
   const envelope = buildBranchEnvelope(facts, transcript.text)
 
-  let targetAgent: RebaseAgent
+  let targetAgent: RebasedIntoAgent
   try {
     targetAgent = await deps.resolveTargetAgent(targetSessionId)
   } catch (error) {
@@ -169,7 +169,7 @@ export async function executeRebase(
       text: `could not open the target branch's session: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
-  // No busy gate, by design (docs/design/rebase.md §2): inject queues durably.
+  // No busy gate, by design (docs/design/rebased-into.md §2): inject queues durably.
   targetAgent.inject(envelope)
   await deps.flush(targetAgent)
 
