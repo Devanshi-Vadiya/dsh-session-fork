@@ -126,7 +126,6 @@ describe('source extensions (extraSource)', () => {
   test('extraSource fields ride the built message source after branchEvent', () => {
     const extra = {
       childSessionId: 'sess-child',
-      atSeq: 7,
       shadowedRange: { start: 13, end: 20 },
       shadowedSeqs: [26, 27],
       sourceCommandId: 'cmd-9',

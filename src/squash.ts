@@ -134,13 +134,20 @@ export function extractCheckpointMessage(session: Session): UserMessage {
   )
 }
 
-/** Merge provenance recorded on the parent-appended checkpoint's source. */
+/**
+ * Merge provenance recorded on the target-appended checkpoint's source.
+ *
+ * Note: `atSeq` (the fork anchor in the target's log) was removed in the
+ * issue #21 refactor. Under the new "any two registered branches" semantics
+ * a single seq number can no longer point at a turn: for non-direct-parent
+ * targets the relevant boundary is the leaving fork edge of a third
+ * ancestor, not a seq in the target log. AI never read the field and no
+ * in-tree consumer depended on it, so it is gone rather than refilled.
+ */
 export interface MergeProvenance {
-  /** The child branch's session id. */
+  /** The child (source) branch's session id. */
   readonly childSessionId: Session['id']
-  /** The registry's fork anchor: the parent log seq of the anchoring turn end. */
-  readonly atSeq: number
-  /** The compacted region by surface position. */
+  /** The compacted region by surface position in the source log. */
   readonly shadowedRange: { readonly start: number; readonly end: number }
   /** The shadowed surface-node seqs, in surface order. */
   readonly shadowedSeqs: readonly number[]
@@ -171,7 +178,6 @@ export interface MergeCheckpointSource {
   readonly compactionId: CompactionId
   readonly sourceCommandId?: CommandId
   readonly childSessionId: Session['id']
-  readonly atSeq: number
   readonly shadowedRange: { readonly start: number; readonly end: number }
   readonly shadowedSeqs: readonly number[]
 }
@@ -229,10 +235,10 @@ export function turnRangeOf(
  * `'compact'` — the merged node stays a recognized compaction checkpoint for
  * every official consumer.
  *
- * Coordinates: `atTurn` is deliberately omitted — `atSeq` is a parent-log
- * seq and the child's turn numbers are not cheaply derivable at this seam.
- * `facts.range` carries `shadowedRange` in child surface positions, which is
- * the child log's own coordinate system.
+ * Coordinates: `facts.range` carries `shadowedRange` in source surface
+ * positions (the source log's own coordinate system). Source/target logs are
+ * independent coordinate spaces — consumers reading the source back must use
+ * `shadowedRange` only against the source's events, never against the target's.
  * @param checkpointMessage - the child's checkpoint message from {@link extractCheckpointMessage}.
  * @param provenance - fork and compaction facts to record on the source.
  * @param branchNames - registry-resolved child and target branch names.
@@ -261,7 +267,6 @@ export function buildMergeCheckpoint(
       compactionId: provenance.compactionId,
       ...(provenance.sourceCommandId === undefined ? {} : { sourceCommandId: provenance.sourceCommandId }),
       childSessionId: provenance.childSessionId,
-      atSeq: provenance.atSeq,
       shadowedRange: provenance.shadowedRange,
       shadowedSeqs: [...provenance.shadowedSeqs],
     },

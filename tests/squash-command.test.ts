@@ -160,7 +160,7 @@ describe('executeSquashAction', () => {
         compactCalls.push({ agent, signal, request })
         return FAKE_RESULT
       },
-      resolveParentAgent: async () => parentAgent,
+      resolveTargetAgent: async () => parentAgent,
       flush: async (agent) => { flushed.push(agent) },
       ...overrides,
     }
@@ -191,7 +191,6 @@ describe('executeSquashAction', () => {
     const source = injected.source as Record<string, unknown>
     expect(isCompactCheckpointSource(injected.source)).toBe(true)
     expect(source.childSessionId).toBe('session-child')
-    expect(source.atSeq).toBe(1) // seedLength 2 anchors one past the turn end
     expect(source.shadowedSeqs).toEqual([2, 3])
     expect(source.compactionId).toBe('compaction-1')
 
@@ -209,7 +208,7 @@ describe('executeSquashAction', () => {
     expect(result.kind === 'error' && result.text).toContain('not idle')
   })
 
-  test('a session without parent lineage is rejected', async () => {
+  test('an unregistered source session is rejected before compaction', async () => {
     const child = fakeAgent(
       fakeSession({ id: 'session-root' }, [{ type: 'user/message' }, { type: 'session/end-seed' }, { type: 'user/message' }], [0, 2]),
       'idle',
@@ -217,7 +216,7 @@ describe('executeSquashAction', () => {
     const { deps } = makeDefs({ childAgent: child })
     const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
     expect(result.kind).toBe('error')
-    expect(result.kind === 'error' && result.text).toContain('no parent')
+    expect(result.kind === 'error' && result.text).toContain('branch name')
   })
 
   test('an unknown target branch is rejected', async () => {
@@ -226,12 +225,10 @@ describe('executeSquashAction', () => {
     expect(result.kind === 'error' && result.text).toContain(`no branch named 'nope'`)
   })
 
-  test('a target that does not own the parent is rejected', async () => {
-    const { deps } = makeDefs({
-      store: memoryStore({ branches: { main: { ...MAIN_RECORD, sessionId: 'session-other' } } }),
-    })
-    const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
-    expect(result.kind === 'error' && result.text).toContain('not this session\'s parent')
+  test('squashing a branch into itself is rejected', async () => {
+    const { deps } = makeDefs()
+    const result = await executeSquashAction({ kind: 'squash', target: 'review' }, deps)
+    expect(result.kind === 'error' && result.text).toContain('into itself')
   })
 
   test('a ManualCompactionError maps to its user text', async () => {
@@ -248,7 +245,7 @@ describe('executeSquashAction', () => {
       fakeSession({ id: 'session-parent' }, [{ type: 'user/message' }], [0]),
       'running',
     )
-    const { deps, flushed } = makeDefs({ resolveParentAgent: async () => busyParent })
+    const { deps, flushed } = makeDefs({ resolveTargetAgent: async () => busyParent })
     const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
     expect(result.kind).toBe('success')
     // The envelope was queued through inject and still flushed durably.
@@ -256,25 +253,6 @@ describe('executeSquashAction', () => {
     expect(busyParent.injected[0]!.content.find(b => b.type === 'text')?.text).toContain('<branch-squash>')
     expect(flushed.length).toBe(1)
     expect(flushed[0]).toBe(busyParent)
-  })
-
-  test('a missing fork anchor is rejected before compaction', async () => {
-    const child = fakeAgent(
-      fakeSession(
-        { parentSession: 'session-parent', id: 'session-child' },
-        [
-          { type: 'user/message' },
-          { type: 'session/end-seed' },
-          { type: 'user/message' },
-          { type: 'user/message', data: { message: checkpointUserMessage('compaction-1', 'x') } },
-        ],
-        [0, 2, 3],
-      ),
-      'idle',
-    )
-    const { deps } = makeDefs({ childAgent: child, store: memoryStore({ branches: { main: MAIN_RECORD } }) })
-    const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
-    expect(result.kind === 'error' && result.text).toContain('fork anchor')
   })
 
   test('an unregistered child session is rejected before compaction', async () => {
@@ -295,22 +273,112 @@ describe('executeSquashAction', () => {
     expect(result.kind === 'error' && result.text).toContain('branch name')
   })
 
-  test('the child registry record wins over the header fallback for atSeq', async () => {
-    const { deps, parentAgent } = makeDefs({
-      store: memoryStore({
-        branches: {
-          main: MAIN_RECORD,
-          review: {
-            name: 'review',
-            sessionId: 'session-child',
-            forkOrigin: { parentSessionId: 'session-parent', atSeq: 7 },
-          },
+  // Issue #21: any two registered branches. Five-relation coverage over one
+  // source fixture (surface seqs [0, 2, 3], seed boundary at seq 1): each
+  // kinship must hand the vendored compaction engine exactly the
+  // merge-region authority's start/end for that relation, and the checkpoint
+  // lands in the TARGET branch's inbox.
+  describe('any-two-branch targets (issue #21)', () => {
+    interface RunOutcome {
+      result: Awaited<ReturnType<typeof executeSquashAction>>
+      target: Agent & { injected: UserMessage[] }
+      request?: { start: number; end: number }
+    }
+
+    /** Run the pipeline over the standard child fixture with a custom registry. */
+    async function runInto(state: RegistryState, targetName: string): Promise<RunOutcome> {
+      const target = fakeAgent(fakeSession({ id: 'the-target' }, [{ type: 'user/message' }], [0]), 'idle')
+      const compactCalls: { request: { start: number; end: number } }[] = []
+      const deps: SquashCommandDeps = {
+        childAgent: fakeAgent(childFixture(), 'idle'),
+        signal: new AbortController().signal,
+        store: memoryStore(state),
+        compact: async (agent, signal, request) => {
+          compactCalls.push({ agent, signal, request } as never)
+          return FAKE_RESULT
         },
-      }),
+        resolveTargetAgent: async () => target,
+        flush: async () => { },
+      }
+      const result = await executeSquashAction({ kind: 'squash', target: targetName }, deps)
+      return { result, target, request: compactCalls[0]?.request }
+    }
+
+    // main(s-a) ← dev(s-d, forked at seq 1) ← review(session-child, forked at seq 0).
+    const NESTED_STATE = (): RegistryState => ({
+      branches: {
+        main: { name: 'main', sessionId: 's-a', forkOrigin: null },
+        dev: { name: 'dev', sessionId: 's-d', forkOrigin: { parentSessionId: 's-a', atSeq: 1 } },
+        review: { name: 'review', sessionId: 'session-child', forkOrigin: { parentSessionId: 's-d', atSeq: 0 } },
+      },
     })
-    const result = await executeSquashAction({ kind: 'squash', target: 'main' }, deps)
-    expect(result.kind).toBe('success')
-    const injected = parentAgent.injected[0]!
-    expect((injected.source as Record<string, unknown>).atSeq).toBe(7)
+
+    test('direct-parent regression: the seed-boundary region is unchanged', async () => {
+      const { result, target, request } = await runInto(NESTED_STATE(), 'dev')
+      expect(result.kind).toBe('success')
+      // review's seed boundary sits at seq 1 → region = surface seqs > 1.
+      expect(request).toMatchObject({ start: 2, end: 3 })
+      expect(target.injected.length).toBe(1)
+    })
+
+    test('deeper ancestor: region = source content since leaving main', async () => {
+      // review left main's lineage when dev forked at seq 1 → seqs > 1.
+      const { result, request } = await runInto(NESTED_STATE(), 'main')
+      expect(result.kind).toBe('success')
+      expect(request).toMatchObject({ start: 2, end: 3 })
+    })
+
+    test('relative: region = source content since leaving the LCA', async () => {
+      const state = NESTED_STATE()
+      // A sibling of review, also forked off dev → LCA = dev, review left
+      // dev at seq 0 → region = surface seqs > 0 (the inherited seq-0 node
+      // is dev's own content, already on the target's side of the LCA).
+      state.branches['other'] = {
+        name: 'other',
+        sessionId: 's-l',
+        forkOrigin: { parentSessionId: 's-d', atSeq: 2 },
+      }
+      const { result, request } = await runInto(state, 'other')
+      expect(result.kind).toBe('success')
+      expect(request).toMatchObject({ start: 2, end: 3 })
+    })
+
+    test('source-ancestor: region = source content the descendant lacks', async () => {
+      const state: RegistryState = {
+        branches: {
+          main: { name: 'main', sessionId: 'session-child', forkOrigin: null },
+          kid: { name: 'kid', sessionId: 's-kid', forkOrigin: { parentSessionId: 'session-child', atSeq: 1 } },
+        },
+      }
+      // The target left this branch at seq 1 → region = seqs > 1.
+      const { result, request } = await runInto(state, 'kid')
+      expect(result.kind).toBe('success')
+      expect(request).toMatchObject({ start: 2, end: 3 })
+    })
+
+    test('unrelated: the whole conversation transfers', async () => {
+      const state: RegistryState = {
+        branches: {
+          review: { name: 'review', sessionId: 'session-child', forkOrigin: { parentSessionId: 's-gone', atSeq: 0 } },
+          stranger: { name: 'stranger', sessionId: 's-z', forkOrigin: { parentSessionId: 's-other', atSeq: 0 } },
+        },
+      }
+      const { result, request } = await runInto(state, 'stranger')
+      expect(result.kind).toBe('success')
+      expect(request).toMatchObject({ start: 0, end: 3 })
+    })
+
+    test('the envelope names both branches regardless of kinship', async () => {
+      const state: RegistryState = {
+        branches: {
+          review: { name: 'review', sessionId: 'session-child', forkOrigin: { parentSessionId: 's-gone', atSeq: 0 } },
+          stranger: { name: 'stranger', sessionId: 's-z', forkOrigin: null },
+        },
+      }
+      const { target } = await runInto(state, 'stranger')
+      const body = target.injected[0]!.content.find(b => b.type === 'text')?.text ?? ''
+      expect(body.startsWith('This is a squash from branch "review" ')).toBe(true)
+      expect(body).toContain('into branch "stranger"')
+    })
   })
 })

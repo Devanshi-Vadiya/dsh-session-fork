@@ -229,7 +229,7 @@ describe('row context menu + fork from here (issue #8)', () => {
     })
   }
 
-  test('right-click opens the menu at the pointer; squash stays disabled without lineage', async () => {
+  test('right-click opens the menu at the pointer; squash stays disabled for unregistered sessions', async () => {
     const mounted = mount(() => Promise.resolve(resultOf(EXPANDABLE_GRAPH2)))
     await flush()
     expect(mounted.container.querySelector('[role="menu"]')).toBeNull()
@@ -610,7 +610,7 @@ describe('squash into branch (issue #8)', () => {
     return [...window.document.querySelectorAll('[role="menuitem"]')] as HTMLButtonElement[]
   }
 
-  test('squash is enabled on forked-session rows and disabled on root rows', async () => {
+  test('squash is enabled on forked-session rows AND root rows (issue #21)', async () => {
     const mounted = mount(
       () => Promise.resolve(resultOf(LINEAGE_GRAPH)),
       LINEAGE_LOAD,
@@ -621,6 +621,7 @@ describe('squash into branch (issue #8)', () => {
     expect(squashChild?.disabled).toBe(false)
     await act(async () => { mounted.root.unmount() })
 
+    // Root branches can now squash into any other registered branch.
     const mountedRoot = mount(
       () => Promise.resolve(resultOf(LINEAGE_GRAPH)),
       LINEAGE_LOAD,
@@ -628,8 +629,19 @@ describe('squash into branch (issue #8)', () => {
     await flush()
     contextMenuOn(mountedRoot, 'root second')
     const squashRoot = menuItems()[1]
-    expect(squashRoot?.disabled).toBe(true)
+    expect(squashRoot?.disabled).toBe(false)
     await act(async () => { mountedRoot.root.unmount() })
+
+    // Unregistered sessions stay disabled (the host rejects them).
+    const mountedUnregistered = mount(
+      () => Promise.resolve(resultOf(LINEAGE_GRAPH)),
+      () => Promise.resolve({ ok: true, value: [] as readonly RegistryBranchDto[] }),
+    )
+    await flush()
+    contextMenuOn(mountedUnregistered, 'root second')
+    const squashUnregistered = menuItems()[1]
+    expect(squashUnregistered?.disabled).toBe(true)
+    await act(async () => { mountedUnregistered.root.unmount() })
   })
 
   test('squash flow: dialog texts name the parent, target goes to the wire, refresh + toast', async () => {

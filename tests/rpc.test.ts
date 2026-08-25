@@ -96,7 +96,7 @@ function portsHarness(options: {
         async resolveChildAgent() { return null },
         openStore() { throw new Error('no store') },
         async compact() { throw new Error('no compact') },
-        async resolveParentAgent() { throw new Error('no parent') },
+        async resolveTargetAgent() { throw new Error('no target') },
         async flush() { return undefined },
       },
     },
@@ -557,7 +557,7 @@ function squashPorts(options: {
       if (options.compactError !== undefined) throw options.compactError
       return options.compactResult ?? SQUASH_RESULT
     },
-    async resolveParentAgent() { return parent },
+    async resolveTargetAgent() { return parent },
     async flush(agent) {
       flushes.push((agent.session as Session).id ?? 'unknown')
     },
@@ -584,7 +584,7 @@ describe('createBranchRpcHandler squash endpoint', () => {
     expect(ports.flushes).toContain('session-parent')
   })
 
-  test('a target that is not the parent branch is a readable error', async () => {
+  test('a non-parent target now succeeds (issue #21); self-target is a readable error', async () => {
     const ports = squashPorts()
     const { ports: harness } = portsHarness({
       workspaces: { '/work': SQUASH_WORKSPACE },
@@ -592,11 +592,23 @@ describe('createBranchRpcHandler squash endpoint', () => {
       squash: ports,
     })
     const handler = createBranchRpcHandler(harness as BranchRpcPorts)
-    const outcome = await handler('squash', { sessionId: 'session-child', target: 'other' })
-    expect(outcome.ok).toBe(false)
-    if (outcome.ok) return
-    expect(outcome.error.message).toContain("is not this session's parent")
-    expect(ports.compactCalls).toBe(0)
+    // 'other' shares no lineage with the child — the whole conversation
+    // transfers now that squash works between any two registered branches.
+    const unrelated = await handler('squash', { sessionId: 'session-child', target: 'other' })
+    expect(unrelated.ok).toBe(true)
+    expect(ports.compactCalls).toBe(1)
+    // Squashing a branch into itself stays rejected, before compaction.
+    const ports2 = squashPorts()
+    const { ports: harness2 } = portsHarness({
+      workspaces: { '/work': SQUASH_WORKSPACE },
+      resolve: () => '/work',
+      squash: ports2,
+    })
+    const self = await createBranchRpcHandler(harness2 as BranchRpcPorts)('squash', { sessionId: 'session-child', target: 'exp' })
+    expect(self.ok).toBe(false)
+    if (self.ok) return
+    expect(self.error.message).toContain('into itself')
+    expect(ports2.compactCalls).toBe(0)
   })
 
   test('a busy child folds into the pipeline busy wording', async () => {

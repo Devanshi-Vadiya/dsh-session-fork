@@ -199,8 +199,8 @@ export interface SquashPorts {
     signal: AbortSignal,
     request: CompactRegionRequest,
   ): Promise<CompactionResult>
-  /** Parent-side agent resolution (vendored ensureSession kernel); public `Agent` only — delivery goes through `inject`. */
-  resolveParentAgent(sessionId: string): Promise<Agent>
+  /** Target-side agent resolution (vendored ensureSession kernel); public `Agent` only — delivery goes through `inject`. */
+  resolveTargetAgent(sessionId: string): Promise<Agent>
   /** Durability checkpoint for one agent's session (`ctx.sessions.flush`). */
   flush(agent: Agent): Promise<unknown>
 }
@@ -349,7 +349,7 @@ export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
           signal,
           store: ports.squash.openStore(workspaceKey),
           compact: ports.squash.compact,
-          resolveParentAgent: ports.squash.resolveParentAgent,
+          resolveTargetAgent: ports.squash.resolveTargetAgent,
           flush: ports.squash.flush,
         })
         return result.kind === 'success'

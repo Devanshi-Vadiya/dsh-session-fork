@@ -504,7 +504,7 @@ export async function apply(ctx: Context): Promise<void> {
             createDomainStore(domain as unknown as DomainLike, workspaceKey),
           compact: (agent, signal, request) =>
             compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
-          resolveParentAgent: (sessionId) =>
+          resolveTargetAgent: (sessionId) =>
             getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
           flush: (agent) => ctx.sessions.flush(agent.session),
         },
@@ -524,7 +524,7 @@ export async function apply(ctx: Context): Promise<void> {
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             compact: (agent, signal, request) =>
               compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
-            resolveParentAgent: (sessionId) =>
+            resolveTargetAgent: (sessionId) =>
               getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
             flush: (agent) => ctx.sessions.flush(agent.session),
           }),
