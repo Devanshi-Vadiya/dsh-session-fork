@@ -65,9 +65,11 @@ export interface TurnSlice {
   readonly subject: string
   /**
    * Squash marker: set (to the merged child's session id) on standalone
-   * rows emitted for a `/squash` merge checkpoint — a between-turns
-   * `user/message` whose plugin source carries `childSessionId`
-   * (src/squash.ts `buildMergeCheckpoint`). On such rows `turn` carries
+   * rows emitted for a `/squash` merge checkpoint — a `user/message` whose
+   * plugin source carries `childSessionId` (src/squash.ts
+   * `buildMergeCheckpoint`). The checkpoint is semantically between-turns,
+   * but the `agent.inject()` transport can deliver it inside an open turn
+   * bracket, so rows are emitted wherever it lands; `turn` carries
    * the checkpoint event's seq (there is no kernel turn handle), so node
    * ids use an `s`-prefixed form to stay collision-free.
    */
@@ -139,9 +141,10 @@ interface OpenTurn {
  * commits; each session's row chain links across the skipped turns
  * naturally (every row parents the previous emitted row). The single
  * sanctioned exception is the `/squash` merge checkpoint (see
- * {@link TurnSlice.squashOf}): it lands between turns and emits its own
- * row so the parent branch shows the squash summary as an ordinary
- * commit (user decision, 2026-08-21).
+ * {@link TurnSlice.squashOf}): it emits its own row so the parent branch
+ * shows the squash summary as an ordinary commit (user decision,
+ * 2026-08-21) — wherever the event physically lands (the `agent.inject()`
+ * transport delivers into an open turn).
  */
 export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSlice[] {
   const turns: TurnSlice[] = []
@@ -182,31 +185,31 @@ export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSl
         break
       }
       case 'user/message': {
+        // A /squash merge checkpoint is a row of its own — the one
+        // sanctioned plugin message. It is semantically between-turns, but
+        // the agreed transport (`agent.inject()`, PR#32: next-step, no
+        // wake) delivers it into whatever turn is open at delivery time
+        // (empirically confirmed: go-ce-v3 2026-08-25, checkpoints at seq
+        // 6534/6535 inside turn 3's bracket), so the row is emitted
+        // wherever the event physically lands.
+        const childSessionId = squashChildSessionId(data)
+        if (childSessionId !== null) {
+          const subject = firstLine(userMessageText(data))
+          if (subject !== '') {
+            turns.push({
+              turn: event.seq,
+              startSeq: event.seq,
+              endSeq: event.seq,
+              ...(event.time === undefined ? {} : { startTime: event.time }),
+              subject,
+              squashOf: childSessionId,
+            })
+          }
+          break
+        }
         if (open !== null && open.subject === '' && isHumanPrompt(data)) {
           const text = userMessageText(data)
           if (text !== '') open.subject = text
-          break
-        }
-        // Between turns, a /squash merge checkpoint is a row of its own —
-        // the one sanctioned plugin message (squash runs as an idle
-        // command, so its checkpoint never sits inside a turn bracket).
-        // Inside an open turn it stays filtered like every other plugin
-        // injection (cannot happen for real squashes today).
-        if (open === null) {
-          const childSessionId = squashChildSessionId(data)
-          if (childSessionId !== null) {
-            const subject = firstLine(userMessageText(data))
-            if (subject !== '') {
-              turns.push({
-                turn: event.seq,
-                startSeq: event.seq,
-                endSeq: event.seq,
-                ...(event.time === undefined ? {} : { startTime: event.time }),
-                subject,
-                squashOf: childSessionId,
-              })
-            }
-          }
         }
         break
       }
