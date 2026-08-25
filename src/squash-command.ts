@@ -1,10 +1,11 @@
 /**
  * `/squash` command: argument parsing and the execution pipeline that runs
- * the vendored compaction engine over the child's post-fork region and
- * queues the merge checkpoint into the parent branch via `agent.inject`. Pure and
- * cordis-free, mirroring command.ts: the plugin shell in index.ts feeds a
- * parsed action plus {@link SquashCommandDeps}; everything here is
- * unit-testable with fake agents.
+ * the vendored compaction engine over the source branch's transfer region
+ * (decided by the shared merge-region authority, issue #21: any two
+ * registered branches) and queues the merge checkpoint into the target
+ * branch via `agent.inject`. Pure and cordis-free, mirroring command.ts: the
+ * plugin shell in index.ts feeds a parsed action plus
+ * {@link SquashCommandDeps}; everything here is unit-testable with fake agents.
  * @module dsh-session-fork/src/squash-command
  */
 
@@ -15,10 +16,10 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { BranchCommandResult } from './command.js'
 import { getBranch, loadRegistry } from './registry.js'
+import { mergeRegion } from './merge-region.js'
 import {
   buildMergeCheckpoint,
   extractCheckpointMessage,
-  postForkRange,
   squashErrorText,
   SquashCoreError,
 } from './squash.js'
@@ -77,8 +78,8 @@ export interface SquashCommandDeps {
     signal: AbortSignal,
     request: CompactRegionRequest,
   ) => Promise<CompactionResult>
-  /** Parent-side agent resolution (vendored ensureSession kernel). */
-  readonly resolveParentAgent: (sessionId: string) => Promise<Agent>
+  /** Target-side agent resolution (vendored ensureSession kernel: resume, never create). */
+  readonly resolveTargetAgent: (sessionId: string) => Promise<Agent>
   /** Durability checkpoint for one agent's session (`ctx.sessions.flush`). */
   readonly flush: (agent: Agent) => Promise<unknown>
 }
@@ -104,10 +105,11 @@ export async function executeSquashAction(
 
 /**
  * The squash pipeline proper (issue #8: extracted so the RPC `squash`
- * endpoint reuses the exact command semantics): idle gate, lineage,
- * registry target check, post-fork range, vendored compaction, merge
- * checkpoint queue delivery into the parent, durability flush. Pure over the
- * injected agents and capabilities — never throws business failures.
+ * endpoint reuses the exact command semantics; issue #21: any two
+ * registered branches): idle gate, registry target check, merge-region
+ * decision (the shared lineage authority), vendored compaction, merge
+ * checkpoint queue delivery into the target, durability flush. Pure over
+ * the injected agents and capabilities — never throws business failures.
  */
 export async function executeSquash(
   target: string,
@@ -119,16 +121,11 @@ export async function executeSquash(
     return { kind: 'error', text: squashErrorText('busy') }
   }
 
-  // Lineage (commit A, unchanged semantics): squash runs from a forked
-  // child and merges into the branch that owns the child's parent session.
+  // Lineage (issue #21): squash runs between any two registered branches.
+  // The merge-region authority decides which part of this branch transfers —
+  // the direct-parent case still lands exactly on the seed boundary (old
+  // postForkRange behavior, delegated inside mergeRegion).
   const childSession = deps.childAgent.session as Session
-  const parentSessionId = childSession.header.parentSession
-  if (parentSessionId === undefined) {
-    return {
-      kind: 'error',
-      text: 'squash must run from a forked child session — this session has no parent',
-    }
-  }
 
   const state = await loadRegistry(deps.store)
   let targetSessionId: string
@@ -137,16 +134,13 @@ export async function executeSquash(
   } catch {
     return { kind: 'error', text: unknownBranch(target) }
   }
-  if (targetSessionId !== parentSessionId) {
-    return {
-      kind: 'error',
-      text: `branch '${target}' is not this session's parent — squash into the branch this session was forked from`,
-    }
+  if (targetSessionId === childSession.id) {
+    return { kind: 'error', text: 'cannot squash a branch into itself' }
   }
 
   // Branch names are point-in-time facts: resolve them from the registry now,
   // before building the merge envelope. The target is the registry key the
-  // user named; the child must be a registered branch to be named in the
+  // user named; the source must be a registered branch to be named in the
   // AI-visible provenance.
   const childRecord = Object.values(state.branches)
     .find(record => record.sessionId === childSession.id)
@@ -158,19 +152,16 @@ export async function executeSquash(
     }
   }
 
-  let range
-  try {
-    range = postForkRange(childSession)
-  } catch (error) {
-    if (error instanceof SquashCoreError) return { kind: 'error', text: error.message }
-    throw error
+  const region = mergeRegion(state, childSession, targetSessionId)
+  if (region.kind === 'error') {
+    return { kind: 'error', text: region.message.replace(/^(?:squash|merge-region):/, 'squash:') }
   }
 
   let result: CompactionResult
   try {
     result = await deps.compact(deps.childAgent, deps.signal, {
-      start: range.start,
-      end: range.end,
+      start: region.start,
+      end: region.end,
       flush: async () => { await deps.flush(deps.childAgent) },
       ...deps.commandId === undefined ? {} : { sourceCommandId: deps.commandId },
     })
@@ -201,24 +192,24 @@ export async function executeSquash(
     throw error
   }
 
-  let parentAgent: Agent
+  let targetAgent: Agent
   try {
-    parentAgent = await deps.resolveParentAgent(parentSessionId)
+    targetAgent = await deps.resolveTargetAgent(targetSessionId)
   } catch (error) {
     return {
       kind: 'error',
-      text: `could not open the parent branch's session: ${error instanceof Error ? error.message : String(error)}`,
+      text: `could not open the target branch's session: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
 
-  // Queue delivery (issue #27): `inject` parks the envelope in the parent's
+  // Queue delivery (issue #27): `inject` parks the envelope in the target's
   // inbox for the next pre-step without waking the driver — the same public
   // path other plugins use (agent-teams rides steer/followup on this very
-  // interface). Squash takes no responsibility for parent busyness: a busy
-  // parent claims the message at its next step boundary, an idle one at its
+  // interface). Squash takes no responsibility for target busyness: a busy
+  // target claims the message at its next step boundary, an idle one at its
   // next wake. The inbox splice is a durable session event, hence the flush.
-  parentAgent.inject(mergeMessage)
-  await deps.flush(parentAgent)
+  targetAgent.inject(mergeMessage)
+  await deps.flush(targetAgent)
 
   return {
     kind: 'success',

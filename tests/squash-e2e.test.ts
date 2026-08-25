@@ -306,7 +306,7 @@ describe('squash e2e: full /squash pipeline into the parent', () => {
         commandId: 'cmd-1' as CommandId,
         store: { load: async () => state, save: async () => { } },
         compact: async () => compaction,
-        resolveParentAgent: async () => parentAgent as never,
+        resolveTargetAgent: async () => parentAgent as never,
         flush: async () => { },
       },
     )

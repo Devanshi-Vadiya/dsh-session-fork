@@ -174,8 +174,12 @@ interface RowMenu {
   readonly y: number
   /** The row's data plane; null when opened on a dangling ref (remove only). */
   readonly meta: RowMeta | null
-  /** Squash lineage facts of the row's session, when it has a fork origin. */
-  readonly squashTarget: { readonly parentSessionId: string; readonly parentName: string } | null
+  /**
+   * Squash facts of the row's session (issue #21): whether it is a
+   * registered branch, and its fork parent's display name as the dialog's
+   * placeholder hint when one exists. Dangling refs are never registered.
+   */
+  readonly squash: { readonly registered: boolean; readonly parentName: string | null }
   /** The branch name the remove action would delete (null: no registered ref). */
   readonly removeName: string | null
 }
@@ -211,18 +215,20 @@ export function BranchGraphView({
   }
 
   /**
-   * Squash lineage of one session, from the registry rows: the fork
-   * origin plus the parent branch's display name (null on root branches —
-   * their rows keep the squash item disabled).
+   * Squash facts of one session, from the registry rows (issue #21: any
+   * registered branch can squash into any other). The item stays disabled
+   * only for sessions that are not registered branches at all; the fork
+   * parent's name is a placeholder hint when one exists.
    */
-  const squashTargetOf = (
+  const squashFactsOf = (
     sessionId: string,
-  ): { readonly parentSessionId: string; readonly parentName: string } | null => {
-    const origin = branches.find(branch => branch.sessionId === sessionId)?.forkOrigin
-    if (origin === undefined || origin === null) return null
-    const parent = branches.find(branch => branch.sessionId === origin.parentSessionId)
-    if (parent === undefined) return null
-    return { parentSessionId: origin.parentSessionId, parentName: parent.name }
+  ): { readonly registered: boolean; readonly parentName: string | null } => {
+    const record = branches.find(branch => branch.sessionId === sessionId)
+    if (record === undefined) return { registered: false, parentName: null }
+    const parent = record.forkOrigin === null
+      ? undefined
+      : branches.find(branch => branch.sessionId === record.forkOrigin?.parentSessionId)
+    return { registered: true, parentName: parent?.name ?? null }
   }
 
   /**
@@ -282,14 +288,14 @@ export function BranchGraphView({
   }
 
   /**
-   * "Squash into branch" (issue #8): collect the target branch name
-   * through the shared dialog (placeholder names the parent branch; the
-   * input stays free-form for the future any-two-branches squash), then
-   * run the host `squash` endpoint. The host keeps the command's lineage
-   * constraint and returns readable failures for the dialog's error row;
-   * success refreshes the graph and toasts.
+   * "Squash into branch" (issue #8, generalized by #21): collect the target
+   * branch name through the shared dialog (free-form; the placeholder names
+   * the fork parent when one exists, as the most likely target), then run
+   * the host `squash` endpoint. The host decides the transfer region and
+   * returns readable failures for the dialog's error row; success refreshes
+   * the graph and toasts.
    */
-  const squashFromRow = (meta: RowMeta, parentName: string): void => {
+  const squashFromRow = (meta: RowMeta, parentName: string | null): void => {
     let acceptedTarget = ''
     void requestBranchName(async (candidate) => {
       const result = await squashBranch({ sessionId: meta.sessionId, target: candidate })
@@ -299,7 +305,7 @@ export function BranchGraphView({
     }, {
       title: t('squash.title'),
       description: t('squash.description'),
-      placeholder: `${t('squash.placeholder')}${parentName}`,
+      placeholder: parentName === null ? t('squash.placeholder') : `${t('squash.placeholder')}${parentName}`,
       confirm: t('squash.confirm'),
     }).then((accepted) => {
       if (accepted === undefined) return
@@ -381,12 +387,13 @@ export function BranchGraphView({
     // Fork/squash are row actions: a menu opened on a dangling ref (no
     // row meta) keeps them visible but disabled.
     { id: 'fork', label: t('menu.fork'), disabled: menu.meta === null },
-    // Squash is offered only on rows whose session has a fork origin —
-    // root-branch rows keep the item visible but disabled.
+    // Squash is offered on every registered branch row — including roots,
+    // which may squash into any other branch (issue #21). Unregistered
+    // sessions and dangling refs keep the item visible but disabled.
     {
       id: 'squash',
       label: t('menu.squash'),
-      disabled: menu.squashTarget === null,
+      disabled: !menu.squash.registered,
     },
     // Remove is offered wherever a registered ref backs the target (the
     // row's session, or the dangling ref itself); disabled otherwise.
@@ -408,7 +415,7 @@ export function BranchGraphView({
               x: event.clientX,
               y: event.clientY,
               meta,
-              squashTarget: squashTargetOf(meta.sessionId),
+              squash: squashFactsOf(meta.sessionId),
               removeName: branchNameOf(meta.sessionId),
             })
           }}
@@ -426,7 +433,7 @@ export function BranchGraphView({
               aria-haspopup="menu"
               onContextMenu={(event) => {
                 event.preventDefault()
-                setMenu({ x: event.clientX, y: event.clientY, meta: null, squashTarget: null, removeName: name })
+                setMenu({ x: event.clientX, y: event.clientY, meta: null, squash: { registered: false, parentName: null }, removeName: name })
               }}
             >
               {name}
@@ -447,8 +454,8 @@ export function BranchGraphView({
           setMenu(null)
           if (current === null) return
           if (id === 'fork' && current.meta !== null) forkFromRow(current.meta)
-          if (id === 'squash' && current.meta !== null && current.squashTarget !== null) {
-            squashFromRow(current.meta, current.squashTarget.parentName)
+          if (id === 'squash' && current.meta !== null && current.squash.registered) {
+            squashFromRow(current.meta, current.squash.parentName)
           }
           if (id === 'remove' && current.removeName !== null) {
             setRemoveAcknowledged(false)
