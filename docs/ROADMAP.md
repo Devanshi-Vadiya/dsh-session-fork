@@ -28,7 +28,7 @@ this plugin makes the branch the building block of AI conversation management:
 | branch | named entry in the branch registry → session id |
 | fork | dsh `fork` at a turn boundary |
 | `merge --squash` | compact the child's post-fork region, append summary to the parent |
-| merge / rebase / tag | v0.1.0+ (see milestones) |
+| merge / rebased-into / tag | v0.1.0+ (see milestones) |
 
 ### Non-goals
 
@@ -61,7 +61,7 @@ milestone of their own.
 
 Inter-branch options plus release chores. Closes when the plugin is npm-installable.
 
-- merge & rebase between branches — #4 (design note required before implementation)
+- merge & rebased-into between branches — #4 (design note required before implementation)
 - squash between any two branches — #21, with TOOL-message research #22
 - remove branch from the GUI — #23 (shipped: `removeBranch` RPC endpoint + branch-tab entry behind the official RiskConfirmation primitive)
 - README #16 and npm pack #17
@@ -71,7 +71,7 @@ Inter-branch options plus release chores. Closes when the plugin is npm-installa
 The core-creativity milestone: agents become branches.
 
 - agents create branches backed by sub agents — #5
-- parallel sub agents communicating via `{merge, rebase, squash}` — #6
+- parallel sub agents communicating via `{merge, rebased-into, squash}` — #6
 
 ### v0.3.0 — Branch-scoped memory (placeholder)
 

@@ -52,7 +52,7 @@ dsh plugin --profile web add dsh-session-fork
 
 我们想继续提供的功能:
 
-1. **Sub Agent 天生契合 branch 模型**。引入 rebase、merge 等源语,让 AI 自主进行 branch 操作、把 Sub Agent 派发到分支上;它们通过 branch 间操作通信,取代传统的邮箱模式。
+1. **Sub Agent 天生契合 branch 模型**。引入 rebased-into、merge 等源语,让 AI 自主进行 branch 操作、把 Sub Agent 派发到分支上;它们通过 branch 间操作通信,取代传统的邮箱模式。
 2. **基于 branch 的项目记忆管理**。现有的长期记忆模型都以项目为粒度,对 branch 模型是灾难——记忆跨 branch 泄漏,直接污染上下文。branch 粒度的记忆管理是让模型更健壮的必经之路。
 
 我们对 AI 协作持开放态度:欢迎自由地用 AI 贡献代码、撰写 commit message 和 PR。但我们希望您对自己的代码负责,亲自 review,并在沟通中把 AI 当作您的工具,而不是让 AI 直接代表您与我们对话。

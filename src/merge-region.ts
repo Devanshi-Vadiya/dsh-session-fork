@@ -3,7 +3,7 @@
  * from the registry's fork DAG and one source session, which part of the
  * source's conversation a transfer into a target branch must carry.
  *
- * The rule (docs/design/rebase.md, generalized 2026-08-23) is git
+ * The rule (docs/design/rebased-into.md, generalized 2026-08-23) is git
  * merge-base semantics restricted to "the source's own work":
  * the region is the source's content since the fork point where its
  * lineage left the lowest common ancestor (LCA) of source and target.
@@ -24,7 +24,7 @@
  * `seedLength >= atSeq + 1` — the two coordinates are NOT interchangeable).
  *
  * Pure and cordis-free; the same tool-pairing balance gates as squash guard
- * every computed boundary. squash, rebase, and merge all consume this one
+ * every computed boundary. squash, rebased-into, and merge all consume this one
  * authority so they can never disagree about lineage.
  * @module dsh-session-fork/src/merge-region
  */
@@ -117,7 +117,7 @@ function ancestry(
  * branch named by `targetSessionId` must carry, with the shared squash
  * balance gates. All failures are returned, never thrown.
  *
- * The caller guarantees `targetSessionId !== sourceSession.id` (rebase's
+ * The caller guarantees `targetSessionId !== sourceSession.id` (rebased-into's
  * self-target check runs first); a violation throws defensively.
  * @param state - the workspace registry (the fork DAG).
  * @param sourceSession - the open source session; read-only.

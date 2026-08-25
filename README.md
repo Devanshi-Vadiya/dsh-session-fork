@@ -52,7 +52,7 @@ In the branch tab: hover a row to see the full prompt; right-click to **fork fro
 
 What we want to build next:
 
-1. **Sub agents are a natural fit for the branch model.** Introduce rebase, merge, and friends as primitives; let AI drive branch operations and dispatch sub agents onto branches that communicate through inter-branch operations — replacing the traditional mailbox pattern.
+1. **Sub agents are a natural fit for the branch model.** Introduce rebased-into, merge, and friends as primitives; let AI drive branch operations and dispatch sub agents onto branches that communicate through inter-branch operations — replacing the traditional mailbox pattern.
 2. **Branch-scoped project memory.** Existing long-term memory models are project-grained, which is a disaster for the branch model: memory leaks across branches and pollutes context. Branch-grained memory management is the road to a more robust model.
 
 We take an open stance on AI collaboration: feel free to use AI to contribute code, write commit messages, and draft PRs. But we expect you to own your code — review it yourself, and treat AI as your tool in communication rather than letting it talk to us on your behalf.

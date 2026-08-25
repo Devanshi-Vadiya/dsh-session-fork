@@ -293,7 +293,7 @@ export function squashErrorText(code: ManualCompactionErrorCode): string {
     case 'summary':
       // TODO(v0.1.x): surface the error.message hint here instead of the
       // generic wording — a summary that would not shrink should suggest
-      // rebase mode.
+      // rebased-into mode.
       return 'Squash could not produce a useful summary. The conversation is unchanged; the attempt is recorded in the session log.'
     case 'commit':
       return 'Squash did not finish cleanly; some session history may have changed. Inspect the current session state before retrying.'

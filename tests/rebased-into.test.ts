@@ -4,14 +4,14 @@
  * own test file (merge-region.test.ts).
  *
  * Pure: no cordis, fake session objects.
- * @module dsh-session-fork/tests/rebase.test
+ * @module dsh-session-fork/tests/rebased-into.test
  */
 
 import { describe, expect, test } from 'bun:test'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { serializeTranscript } from '../src/rebase.js'
+import { serializeTranscript } from '../src/rebased-into.js'
 
 interface FakeEvent {
   type: string

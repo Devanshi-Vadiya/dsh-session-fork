@@ -86,20 +86,20 @@ describe('buildBranchEnvelope', () => {
   })
 
   test('omits the fork clause when atTurn is unknown, keeping the range', () => {
-    const facts: BranchEventFacts = { kind: 'rebase', from: 'review', to: 'main', range: { start: 13, end: 20 } }
+    const facts: BranchEventFacts = { kind: 'rebased-into', from: 'review', to: 'main', range: { start: 13, end: 20 } }
     const message = buildBranchEnvelope(facts, 'transcript')
     expect(text(message)).toContain(
-      'This is a rebase from branch "review" (covering its turns 13–20) into branch "main".',
+      'This is a rebased-into from branch "review" (covering its turns 13–20) into branch "main".',
     )
   })
 
   test('names the material per kind: summary vs transcript', () => {
     expect(text(buildBranchEnvelope(squashFacts, 'x'))).toContain('The summary below happened on')
-    const rebase: BranchEventFacts = { kind: 'rebase', from: 'review', to: 'main' }
-    expect(text(buildBranchEnvelope(rebase, 'x'))).toContain('The transcript below happened on')
+    const rebasedInto: BranchEventFacts = { kind: 'rebased-into', from: 'review', to: 'main' }
+    expect(text(buildBranchEnvelope(rebasedInto, 'x'))).toContain('The transcript below happened on')
   })
 
-  test('pages a long rebase transcript with stable coordinates in tags and summary', () => {
+  test('pages a long rebased-into transcript with stable coordinates in tags and summary', () => {
     const message = buildBranchEnvelope(squashFacts, 'page body', { index: 2, total: 3 })
     const t = text(message)
     expect(t).toContain('<branch-squash 2/3>\npage body\n</branch-squash>')
@@ -111,9 +111,9 @@ describe('buildBranchEnvelope', () => {
     expect(text(message)).toContain('<branch-squash>\nbody\n</branch-squash>')
   })
 
-  test('rebase transcripts use the recall context form', () => {
-    const rebase: BranchEventFacts = { kind: 'rebase', from: 'review', to: 'main' }
-    expect((buildBranchEnvelope(rebase, 't').source as { form: string }).form).toBe('recall')
+  test('rebased-into transcripts use the recall context form', () => {
+    const rebasedInto: BranchEventFacts = { kind: 'rebased-into', from: 'review', to: 'main' }
+    expect((buildBranchEnvelope(rebasedInto, 't').source as { form: string }).form).toBe('recall')
     expect((buildBranchEnvelope(squashFacts, 't').source as { form: string }).form).toBe('notice')
   })
 })

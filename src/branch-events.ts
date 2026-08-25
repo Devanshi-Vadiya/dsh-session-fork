@@ -1,9 +1,9 @@
 /**
  * Branch event envelopes: the single, shared way every branch operation
- * (fork, squash, rebase) renders an AI-visible provenance message.
+ * (fork, squash, rebased-into) renders an AI-visible provenance message.
  *
  * Design contract (agreed 2026-08-22 before the enhance-fork / enhance-squash
- * / implement-rebase workstreams forked off):
+ * / implement-rebased-into workstreams forked off):
  *
  * - Every branch event is ONE `user/message`. The `source` carries
  *   machine-readable provenance (`branchEvent`) plus a UI-facing
@@ -13,7 +13,7 @@
  *   - `buildBranchNotice` — a one-line account of something that happened
  *     (fork notifications, both directions). No payload, no tags.
  *   - `buildBranchEnvelope` — an English preamble plus an XML-style
- *     `<branch-<kind>>` tag pair wrapping a payload (squash summary, rebase
+ *     `<branch-<kind>>` tag pair wrapping a payload (squash summary, rebased-into
  *     transcript pages), mirroring the official compaction checkpoint shape
  *     (compaction-basic/src/summarizer.ts: `CHECKPOINT_PREAMBLE` +
  *     `<compacted-summary>` tags). The tags delimit material that
@@ -35,7 +35,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 
 /** The branch operations that emit AI-visible provenance messages. */
-export type BranchEventKind = 'fork' | 'squash' | 'rebase'
+export type BranchEventKind = 'fork' | 'squash' | 'rebased-into'
 
 /**
  * The facts a branch event states. Every field names durable truth at write
@@ -46,13 +46,13 @@ export type BranchEventKind = 'fork' | 'squash' | 'rebase'
 export interface BranchEventFacts {
   /** Which operation this event records. */
   readonly kind: BranchEventKind
-  /** Name of the branch the material came FROM (the child for squash/rebase, the parent for fork). */
+  /** Name of the branch the material came FROM (the child for squash/rebased-into, the parent for fork). */
   readonly from: string
   /** Name of the branch this message is written INTO. */
   readonly to: string
   /** Fork point: the parent's turn number at which `from` diverged. Present on every event once known. */
   readonly atTurn?: number
-  /** The child-side turn range this event covers (squash region, rebase graft). */
+  /** The child-side turn range this event covers (squash region, rebased-into graft). */
   readonly range?: { readonly start: number; readonly end: number }
   /** Session id of the `from` branch, for machine consumers. */
   readonly fromSessionId?: string
@@ -67,7 +67,7 @@ export interface BranchEventFacts {
 export interface BranchEventSource {
   readonly kind: 'plugin'
   readonly plugin: 'dsh-session-fork'
-  /** 'recall' when the payload is lifted out of another session's log (rebase transcripts). */
+  /** 'recall' when the payload is lifted out of another session's log (rebased-into transcripts). */
   readonly form: 'notice' | 'recall'
   /** One-line UI account, bounded to the official 120-char notice limit. */
   readonly summary: string
@@ -75,7 +75,7 @@ export interface BranchEventSource {
   readonly branchEvent: BranchEventFacts
 }
 
-/** One page of a multi-page envelope payload (rebase transcripts can be long). */
+/** One page of a multi-page envelope payload (rebased-into transcripts can be long). */
 export interface BranchEventPage {
   /** 1-based page index. */
   readonly index: number
@@ -147,19 +147,19 @@ export const branchNoticeLines = {
 const MATERIAL_NOUN: Readonly<Record<BranchEventKind, string>> = {
   fork: 'notice',
   squash: 'summary',
-  rebase: 'transcript',
+  'rebased-into': 'transcript',
 }
 
 /**
  * Build a branch event envelope around a payload: an English preamble plus
  * an XML-style tag pair, mirroring the official compaction checkpoint. The
  * payload is material from ANOTHER branch: a squash summary, or one page of
- * a rebase transcript. The preamble states full provenance and marks the
+ * a rebased-into transcript. The preamble states full provenance and marks the
  * material as background; the close tag keeps later grafted material from
  * blurring into the target's own history.
- * @param facts - the event facts; `kind` is 'squash' or 'rebase' (fork has no payload).
+ * @param facts - the event facts; `kind` is 'squash' or 'rebased-into' (fork has no payload).
  * @param payload - the verbatim payload text (summary or transcript page).
- * @param page - paging coordinates for multi-message rebase transcripts.
+ * @param page - paging coordinates for multi-message rebased-into transcripts.
  * @param extraSource - caller-owned fields spread onto the source AFTER
  *   `branchEvent` (e.g. MergeCheckpointSource fields); the reserved keys this
  *   builder owns are compile-time rejected ({@link BranchEventExtraSource}).
@@ -188,7 +188,7 @@ export function buildBranchEnvelope(
     source: {
       kind: 'plugin',
       plugin: 'dsh-session-fork',
-      form: facts.kind === 'rebase' ? 'recall' : 'notice',
+      form: facts.kind === 'rebased-into' ? 'recall' : 'notice',
       summary: boundContextSummary(
         page !== undefined && page.total > 1
           ? `${facts.kind} ${page.index}/${page.total}: ${facts.from} → ${facts.to}`

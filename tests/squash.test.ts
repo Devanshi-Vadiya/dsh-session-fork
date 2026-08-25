@@ -344,7 +344,7 @@ describe('squashErrorText', () => {
     }
   })
 
-  test('the summary wording carries the v0.1.x rebase-hint TODO', () => {
+  test('the summary wording carries the v0.1.x rebased-into-hint TODO', () => {
     const source = readFileSync(new URL('../src/squash.ts', import.meta.url), 'utf8')
     expect(source).toContain('TODO(v0.1.x)')
   })
