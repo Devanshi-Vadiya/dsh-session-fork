@@ -60,20 +60,32 @@ export interface TurnSlice {
   readonly startTime?: number
   /**
    * First human prompt text in the turn; '' when the turn has none. On a
-   * squash row (`squashOf` set) this is the merge checkpoint's summary.
+   * transfer row (`transferOf` set) this is the envelope preamble head.
    */
   readonly subject: string
   /**
-   * Squash marker: set (to the merged child's session id) on standalone
-   * rows emitted for a `/squash` merge checkpoint — a `user/message` whose
-   * plugin source carries `childSessionId` (src/squash.ts
-   * `buildMergeCheckpoint`). The checkpoint is semantically between-turns,
-   * but the `agent.inject()` transport can deliver it inside an open turn
-   * bracket, so rows are emitted wherever it lands; `turn` carries
-   * the checkpoint event's seq (there is no kernel turn handle), so node
-   * ids use an `s`-prefixed form to stay collision-free.
+   * Transfer marker: set on standalone rows emitted for a `/squash` or
+   * `/rebased into` transfer envelope — a `user/message` whose plugin
+   * source carries a `branchEvent` of kind `squash`/`rebased-into`
+   * (src/branch-events.ts `buildBranchEnvelope`). The transfer is
+   * semantically between-turns, but the `agent.inject()` transport can
+   * deliver it inside an open turn bracket, so rows are emitted wherever
+   * it lands; `turn` carries the envelope event's seq (there is no kernel
+   * turn handle), so node ids use an `s`-prefixed form to stay
+   * collision-free.
    */
-  readonly squashOf?: string
+  readonly transferOf?: TransferFacts
+}
+
+/**
+ * The transfer facts a transfer row stands for: which kind of branch
+ * transfer produced the envelope, and the source branch's session id
+ * (`branchEvent.fromSessionId` — the merged child for squash, the
+ * serialized source for rebased-into).
+ */
+export interface TransferFacts {
+  readonly kind: 'squash' | 'rebased-into'
+  readonly fromSessionId: string
 }
 
 /** First line of a text, trimmed — the squash row shows the summary head. */
@@ -83,20 +95,30 @@ function firstLine(text: string): string {
 }
 
 /**
- * The merged child's session id when `data` is a `/squash` merge
- * checkpoint user message, else null. The checkpoint is the ONE plugin
- * message that forms a row (user decision, 2026-08-21): its source is the
- * official compaction-checkpoint shape (`kind: 'plugin'`,
- * `plugin: 'compact'`) extended by src/squash.ts with `childSessionId` —
- * that extension is what separates it from dsh's own `/compact`
- * checkpoints, which stay filtered like every other plugin message.
+ * The transfer facts when `data` is a branch-event envelope user message
+ * (a `/squash` merge checkpoint or a `/rebased into` transcript), else
+ * null. The envelope source is the shared branch-event shape
+ * (`kind: 'plugin'`, `branchEvent: { kind, …, fromSessionId }`) built by
+ * src/branch-events.ts `buildBranchEnvelope` — every delivered transfer
+ * carries it, so the graph keys on the `branchEvent` facts rather than on
+ * each kind's `extraSource` extensions (squash's `childSessionId`;
+ * rebased-into has none). That is what separates transfer envelopes from
+ * dsh's own `/compact` checkpoints and every other plugin message, which
+ * stay filtered.
  */
-function squashChildSessionId(data: unknown): string | null {
+function transferFactsOf(data: unknown): TransferFacts | null {
   if (data === null || typeof data !== 'object') return null
-  const source = (data as { source?: { kind?: unknown; plugin?: unknown; childSessionId?: unknown } }).source
-  if (source === null || typeof source !== 'object') return null
-  if (source.kind !== 'plugin' || source.plugin !== 'compact') return null
-  return typeof source.childSessionId === 'string' ? source.childSessionId : null
+  const source = (data as { source?: {
+    kind?: unknown
+    branchEvent?: { kind?: unknown; fromSessionId?: unknown } | null
+  } }).source
+  if (source === null || typeof source !== 'object' || source.kind !== 'plugin') return null
+  const facts = source.branchEvent
+  if (facts === null || typeof facts !== 'object') return null
+  if (facts.kind !== 'squash' && facts.kind !== 'rebased-into') return null
+  return typeof facts.fromSessionId === 'string'
+    ? { kind: facts.kind, fromSessionId: facts.fromSessionId }
+    : null
 }
 
 /** Text of one user message: its text blocks joined and trimmed. */
@@ -139,12 +161,12 @@ interface OpenTurn {
  * branch). A turn without a human prompt emits NO row at all — synthetic
  * injections (goal rounds, plugin reminders, team messages) are not
  * commits; each session's row chain links across the skipped turns
- * naturally (every row parents the previous emitted row). The single
- * sanctioned exception is the `/squash` merge checkpoint (see
- * {@link TurnSlice.squashOf}): it emits its own row so the parent branch
- * shows the squash summary as an ordinary commit (user decision,
- * 2026-08-21) — wherever the event physically lands (the `agent.inject()`
- * transport delivers into an open turn).
+ * naturally (every row parents the previous emitted row). The sanctioned
+ * exception is the branch-event transfer envelope (see
+ * {@link TurnSlice.transferOf}): it emits its own row so the target branch
+ * shows the transfer as an ordinary commit (user decision, 2026-08-21)
+ * — wherever the event physically lands (the `agent.inject()` transport
+ * delivers into an open turn).
  */
 export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSlice[] {
   const turns: TurnSlice[] = []
@@ -185,15 +207,16 @@ export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSl
         break
       }
       case 'user/message': {
-        // A /squash merge checkpoint is a row of its own — the one
-        // sanctioned plugin message. It is semantically between-turns, but
-        // the agreed transport (`agent.inject()`, PR#32: next-step, no
-        // wake) delivers it into whatever turn is open at delivery time
-        // (empirically confirmed: go-ce-v3 2026-08-25, checkpoints at seq
-        // 6534/6535 inside turn 3's bracket), so the row is emitted
-        // wherever the event physically lands.
-        const childSessionId = squashChildSessionId(data)
-        if (childSessionId !== null) {
+        // A transfer envelope (/squash checkpoint, /rebased into
+        // transcript) is a row of its own — the one sanctioned plugin
+        // message. It is semantically between-turns, but the agreed
+        // transport (`agent.inject()`, PR#32: next-step, no wake) delivers
+        // it into whatever turn is open at delivery time (empirically
+        // confirmed: go-ce-v3 2026-08-25, checkpoints at seq 6534/6535
+        // inside turn 3's bracket), so the row is emitted wherever the
+        // event physically lands.
+        const transfer = transferFactsOf(data)
+        if (transfer !== null) {
           const subject = firstLine(userMessageText(data))
           if (subject !== '') {
             turns.push({
@@ -202,7 +225,7 @@ export function extractTurns(events: readonly GraphEvent[], fromSeq = 0): TurnSl
               endSeq: event.seq,
               ...(event.time === undefined ? {} : { startTime: event.time }),
               subject,
-              squashOf: childSessionId,
+              transferOf: transfer,
             })
           }
           break
@@ -340,12 +363,13 @@ export interface BranchGraph {
 const nodeId = (sessionId: string, turn: number): string => `${sessionId}:${turn}`
 
 /**
- * Node id of one slice: ordinary turns are `${sessionId}:${turn}`; squash
- * rows carry the checkpoint's seq (no kernel turn handle), so they take an
- * `s`-prefixed seq form to stay collision-free with turn numbers.
+ * Node id of one slice: ordinary turns are `${sessionId}:${turn}`;
+ * transfer rows carry the envelope event's seq (no kernel turn handle), so
+ * they take an `s`-prefixed seq form to stay collision-free with turn
+ * numbers.
  */
 const sliceId = (sessionId: string, slice: TurnSlice): string =>
-  slice.squashOf === undefined ? nodeId(sessionId, slice.turn) : `${sessionId}:s${slice.turn}`
+  slice.transferOf === undefined ? nodeId(sessionId, slice.turn) : `${sessionId}:s${slice.turn}`
 
 /**
  * The turn of `log` whose span contains `seq` (a turn/end seq anchors it).
@@ -356,7 +380,7 @@ function turnContaining(turns: readonly TurnSlice[], seq: number): TurnSlice | n
   let found: TurnSlice | null = null
   for (const turn of turns) {
     if (turn.startSeq > seq) break
-    if (turn.squashOf !== undefined) continue
+    if (turn.transferOf !== undefined) continue
     found = turn
   }
   return found
@@ -451,12 +475,16 @@ export async function assembleBranchGraph(
       if (index === 0 && anchorId !== null) parentIds.push(anchorId)
       // A squash row is merge-shaped: the merged child's head is its second
       // parent, so the renderer draws the joining lane (vscode merge curve).
-      // Only a registered child branch resolves — an unregistered child
-      // (squash's header-lineage fallback) degrades by omission, matching
-      // how unreadable sessions and outside anchors degrade (user decision).
-      if (turn.squashOf !== undefined) {
-        const childHead = ownTurns.get(turn.squashOf)?.at(-1)
-        if (childHead !== undefined) parentIds.push(sliceId(turn.squashOf, childHead))
+      // A rebased-into row is deliberately NOT merge-shaped (user decision,
+      // 2026-08-26): rebased-into injects information into the target —
+      // "a rebase commit on the target branch" — it does not attach the
+      // source branch, so no second parent. Only a registered child branch
+      // resolves — an unregistered child (squash's header-lineage fallback)
+      // degrades by omission, matching how unreadable sessions and outside
+      // anchors degrade (user decision).
+      if (turn.transferOf?.kind === 'squash') {
+        const childHead = ownTurns.get(turn.transferOf.fromSessionId)?.at(-1)
+        if (childHead !== undefined) parentIds.push(sliceId(turn.transferOf.fromSessionId, childHead))
       }
       const id = sliceId(sessionId, turn)
       mutableNodes.push({

@@ -143,7 +143,8 @@ describe('extractTurns', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'squash summary line\nmore detail' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
+            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
         },
       },
       // dsh's own /compact checkpoint: same shape WITHOUT childSessionId —
@@ -161,7 +162,7 @@ describe('extractTurns', () => {
     ]
     expect(extractTurns(events)).toEqual([
       { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'parent prompt' },
-      { turn: 3, startSeq: 3, endSeq: 3, startTime: 2, subject: 'squash summary line', squashOf: 's-child' },
+      { turn: 3, startSeq: 3, endSeq: 3, startTime: 2, subject: 'squash summary line', transferOf: { kind: 'squash', fromSessionId: 's-child' } },
       { turn: 2, startSeq: 5, endSeq: 7, startTime: 4, subject: 'later prompt' },
     ])
   })
@@ -180,7 +181,8 @@ describe('extractTurns', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'squash summary line\nmore detail' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
+            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
         },
       },
       {
@@ -195,7 +197,7 @@ describe('extractTurns', () => {
     ]
     expect(extractTurns(events)).toEqual([
       { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'parent prompt' },
-      { turn: 4, startSeq: 4, endSeq: 4, startTime: 3, subject: 'squash summary line', squashOf: 's-child' },
+      { turn: 4, startSeq: 4, endSeq: 4, startTime: 3, subject: 'squash summary line', transferOf: { kind: 'squash', fromSessionId: 's-child' } },
       { turn: 2, startSeq: 3, endSeq: 6, startTime: 2, subject: 'post-squash prompt' },
     ])
   })
@@ -210,13 +212,77 @@ describe('extractTurns', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'squash summary line' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
+            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
         },
       },
       { seq: 2, type: 'turn/end', time: 3, data: { turn: 1, reason: { kind: 'completed' } } },
     ]
     expect(extractTurns(events)).toEqual([
-      { turn: 1, startSeq: 1, endSeq: 1, startTime: 2, subject: 'squash summary line', squashOf: 's-child' },
+      { turn: 1, startSeq: 1, endSeq: 1, startTime: 2, subject: 'squash summary line', transferOf: { kind: 'squash', fromSessionId: 's-child' } },
+    ])
+  })
+
+  test('a /rebased into envelope between turns emits its own row', () => {
+    // The rebased-into transcript rides the shared branch-event envelope:
+    // source kind plugin (the envelope builder's own plugin name, form
+    // recall) with branchEvent kind 'rebased-into' and fromSessionId —
+    // the same detection key as squash, no compaction identity involved.
+    const events = [
+      ...sessionEvents([{ turn: 1, subject: 'target prompt', time: 1 }]),
+      {
+        seq: 3, type: 'user/message', time: 2,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'This is a rebased-into from branch "exp" into branch "main".\nuser: did work' }],
+          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall',
+            branchEvent: { kind: 'rebased-into', from: 'exp', to: 'main', fromSessionId: 's-exp' } },
+        },
+      },
+      ...sessionEvents([{ turn: 2, subject: 'later prompt', time: 4 }])
+        .map(event => ({ ...event, seq: event.seq + 5 })),
+    ]
+    expect(extractTurns(events)).toEqual([
+      { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'target prompt' },
+      { turn: 3, startSeq: 3, endSeq: 3, startTime: 2,
+        subject: 'This is a rebased-into from branch "exp" into branch "main".',
+        transferOf: { kind: 'rebased-into', fromSessionId: 's-exp' } },
+      { turn: 2, startSeq: 5, endSeq: 7, startTime: 4, subject: 'later prompt' },
+    ])
+  })
+
+  test('a /rebased into envelope inside an open turn still emits its own row (agent.inject delivery)', () => {
+    // Same delivery reality as squash: inject() lands the envelope in
+    // whatever turn bracket is open — the row must not be swallowed and
+    // must not leak into the enclosing turn's subject.
+    const events = [
+      ...sessionEvents([{ turn: 1, subject: 'target prompt', time: 1 }]),
+      { seq: 3, type: 'turn/start', time: 2, data: { turn: 2 } },
+      {
+        seq: 4, type: 'user/message', time: 3,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'This is a rebased-into from branch "exp" into branch "main".\nuser: did work' }],
+          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall',
+            branchEvent: { kind: 'rebased-into', from: 'exp', to: 'main', fromSessionId: 's-exp' } },
+        },
+      },
+      {
+        seq: 5, type: 'user/message', time: 4,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'post-rebase prompt' }],
+          source: { kind: 'user' },
+        },
+      },
+      { seq: 6, type: 'turn/end', time: 5, data: { turn: 2, reason: { kind: 'completed' } } },
+    ]
+    expect(extractTurns(events)).toEqual([
+      { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'target prompt' },
+      { turn: 4, startSeq: 4, endSeq: 4, startTime: 3,
+        subject: 'This is a rebased-into from branch "exp" into branch "main".',
+        transferOf: { kind: 'rebased-into', fromSessionId: 's-exp' } },
+      { turn: 2, startSeq: 3, endSeq: 6, startTime: 2, subject: 'post-rebase prompt' },
     ])
   })
 })
@@ -384,7 +450,8 @@ describe('assembleBranchGraph', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'exp conclusion' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
+            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
         },
       },
       ...later,
@@ -426,7 +493,8 @@ describe('assembleBranchGraph', () => {
       data: {
         role: 'user',
         content: [{ type: 'text', text: 'exp conclusion' }],
-        source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+        source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
+            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
       },
     }
     const rootEvents: GraphEvent[] = [...rootTurns, ...enclosing, checkpoint]
@@ -460,7 +528,8 @@ describe('assembleBranchGraph', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'stray conclusion' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-unregistered', compactionId: 'c2' },
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-unregistered', compactionId: 'c2',
+            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-unregistered' } },
         },
       },
     ]
@@ -474,6 +543,83 @@ describe('assembleBranchGraph', () => {
     const byId = new Map(graph.nodes.map(node => [node.id, node]))
     expect(byId.get('s-root:s3')?.subject).toBe('stray conclusion')
     expect(byId.get('s-root:s3')?.parentIds).toEqual(['s-root:1'])
+  })
+
+  test('a rebased-into row is a plain single-parent commit even when the source branch is registered', async () => {
+    // Deliberate divergence from git (user decision, 2026-08-26):
+    // rebased-into INJECTS information into the target — the row is a
+    // rebase commit on the target branch, the source branch is NOT
+    // attached, so no merge-join lane is drawn however registered the
+    // source is. The row chains into the target's next turn.
+    const rootTurns = sessionEvents([
+      { turn: 1, subject: 'first', time: 10 },
+      { turn: 2, subject: 'second', time: 20 },
+    ])
+    const graftSeq = rootTurns.length
+    const later = sessionEvents([{ turn: 3, subject: 'after rebase', time: 40 }])
+      .map(event => ({ ...event, seq: event.seq + graftSeq + 1 }))
+    const rootEvents: GraphEvent[] = [
+      ...rootTurns,
+      {
+        seq: graftSeq, type: 'user/message', time: 30,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'This is a rebased-into from branch "exp" into branch "main".\nuser: did work' }],
+          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall',
+            branchEvent: { kind: 'rebased-into', from: 'exp', to: 'main', fromSessionId: 's-exp' } },
+        },
+      },
+      ...later,
+    ]
+    const expEvents = sessionEvents([{ turn: 1, subject: 'experiment', time: 25 }])
+    const logs = new Map<string, GraphSessionLog>([
+      ['s-root', { header: {}, events: rootEvents }],
+      ['s-exp', { header: { seedLength: 0, parentSession: 's-root' }, events: expEvents }],
+    ])
+    const branches: BranchLike[] = [
+      { name: 'main', sessionId: 's-root', forkOrigin: null },
+      { name: 'exp', sessionId: 's-exp', forkOrigin: { parentSessionId: 's-root', atSeq: endSeqOf(rootTurns, 2) } },
+    ]
+    const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
+    const byId = new Map(graph.nodes.map(node => [node.id, node]))
+    expect(byId.get('s-root:s6')?.subject).toBe('This is a rebased-into from branch "exp" into branch "main".')
+    // Single parent only — no 's-exp:1' second parent, no merge lane.
+    expect(byId.get('s-root:s6')?.parentIds).toEqual(['s-root:2'])
+    expect(byId.get('s-root:3')?.parentIds).toEqual(['s-root:s6'])
+  })
+
+  test('a rebased-into row never anchors a fork', async () => {
+    // A fork anchored (atSeq) exactly on the transfer row's seq must fall
+    // back to the previous real turn: transfer rows carry no kernel turn
+    // handle, so they are skipped by anchor resolution exactly like
+    // squash rows.
+    const rootTurns = sessionEvents([{ turn: 1, subject: 'first', time: 10 }])
+    const graftSeq = rootTurns.length
+    const rootEvents: GraphEvent[] = [
+      ...rootTurns,
+      {
+        seq: graftSeq, type: 'user/message', time: 20,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'This is a rebased-into from branch "exp" into branch "main".' }],
+          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall',
+            branchEvent: { kind: 'rebased-into', from: 'exp', to: 'main', fromSessionId: 's-exp' } },
+        },
+      },
+    ]
+    const logs = new Map<string, GraphSessionLog>([
+      ['s-root', { header: {}, events: rootEvents }],
+      ['s-new', { header: { seedLength: graftSeq + 1, parentSession: 's-root' },
+        events: [...rootEvents, ...sessionEvents([{ turn: 2, subject: 'new branch work', time: 30 }])
+          .map(event => ({ ...event, seq: event.seq + graftSeq + 1 }))] }],
+    ])
+    const branches: BranchLike[] = [
+      { name: 'main', sessionId: 's-root', forkOrigin: null },
+      { name: 'new', sessionId: 's-new', forkOrigin: { parentSessionId: 's-root', atSeq: graftSeq } },
+    ]
+    const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
+    const byId = new Map(graph.nodes.map(node => [node.id, node]))
+    expect(byId.get('s-new:2')?.parentIds).toEqual(['s-root:1'])
   })
 
   test('timestamp-less logs order deterministically by branch order then seq', async () => {
