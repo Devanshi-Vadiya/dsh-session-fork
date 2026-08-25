@@ -165,6 +165,60 @@ describe('extractTurns', () => {
       { turn: 2, startSeq: 5, endSeq: 7, startTime: 4, subject: 'later prompt' },
     ])
   })
+
+  test('a /squash merge checkpoint inside an open turn still emits its own row (agent.inject delivery)', () => {
+    // The agreed transport (agent.inject(), next-step no wake) delivers the
+    // checkpoint into whatever turn bracket is open at delivery time
+    // (empirically: go-ce-v3 2026-08-25, checkpoints landed inside turn 3).
+    // The checkpoint is its own row wherever it lands, does not leak into
+    // the enclosing turn's subject, and precedes that turn's own row.
+    const events = [
+      ...sessionEvents([{ turn: 1, subject: 'parent prompt', time: 1 }]),
+      { seq: 3, type: 'turn/start', time: 2, data: { turn: 2 } },
+      {
+        seq: 4, type: 'user/message', time: 3,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'squash summary line\nmore detail' }],
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+        },
+      },
+      {
+        seq: 5, type: 'user/message', time: 4,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'post-squash prompt' }],
+          source: { kind: 'user' },
+        },
+      },
+      { seq: 6, type: 'turn/end', time: 5, data: { turn: 2, reason: { kind: 'completed' } } },
+    ]
+    expect(extractTurns(events)).toEqual([
+      { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'parent prompt' },
+      { turn: 4, startSeq: 4, endSeq: 4, startTime: 3, subject: 'squash summary line', squashOf: 's-child' },
+      { turn: 2, startSeq: 3, endSeq: 6, startTime: 2, subject: 'post-squash prompt' },
+    ])
+  })
+
+  test('a checkpoint inside a subject-less open turn survives even though the turn itself emits nothing', () => {
+    // The enclosing turn never gets a human prompt, so it yields no row —
+    // but the checkpoint inside it is still a row of its own.
+    const events = [
+      { seq: 0, type: 'turn/start', time: 1, data: { turn: 1 } },
+      {
+        seq: 1, type: 'user/message', time: 2,
+        data: {
+          role: 'user',
+          content: [{ type: 'text', text: 'squash summary line' }],
+          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+        },
+      },
+      { seq: 2, type: 'turn/end', time: 3, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    expect(extractTurns(events)).toEqual([
+      { turn: 1, startSeq: 1, endSeq: 1, startTime: 2, subject: 'squash summary line', squashOf: 's-child' },
+    ])
+  })
 })
 
 /** The canonical workspace: root session + one forked child. */
@@ -349,6 +403,48 @@ describe('assembleBranchGraph', () => {
     expect(byId.get('s-root:s6')?.subject).toBe('exp conclusion')
     expect(byId.get('s-root:s6')?.parentIds).toEqual(['s-root:2', 's-child:1'])
     expect(byId.get('s-root:3')?.parentIds).toEqual(['s-root:s6'])
+  })
+
+  test('a checkpoint delivered inside an open turn still draws the full merge join', async () => {
+    // agent.inject() delivery shape: turn 3 opens, the checkpoint lands
+    // inside its bracket, then the human continues on the parent branch.
+    // The squash row must still parent to the previous root row AND the
+    // registered child's head (merge-join lane), and the enclosing turn's
+    // row chains through the squash row.
+    const rootTurns = sessionEvents([
+      { turn: 1, subject: 'first', time: 10 },
+      { turn: 2, subject: 'second', time: 20 },
+    ])
+    const openSeq = rootTurns.length
+    const enclosing = sessionEvents([{ turn: 3, subject: 'after squash', time: 40 }])
+      .map(event => ({ ...event, seq: event.seq + openSeq + 1 }))
+    // Splice the checkpoint right after the enclosing turn/start.
+    const enclosingStart = enclosing.find(event => event.type === 'turn/start')
+    if (enclosingStart === undefined) throw new Error('fixture: no turn/start')
+    const checkpoint: GraphEvent = {
+      seq: enclosingStart.seq + 0.5, type: 'user/message', time: 30,
+      data: {
+        role: 'user',
+        content: [{ type: 'text', text: 'exp conclusion' }],
+        source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1' },
+      },
+    }
+    const rootEvents: GraphEvent[] = [...rootTurns, ...enclosing, checkpoint]
+      .sort((left, right) => left.seq - right.seq)
+    const childEvents = sessionEvents([{ turn: 1, subject: 'experiment', time: 25 }])
+    const logs = new Map<string, GraphSessionLog>([
+      ['s-root', { header: {}, events: rootEvents }],
+      ['s-child', { header: { seedLength: 0, parentSession: 's-root' }, events: childEvents }],
+    ])
+    const branches: BranchLike[] = [
+      { name: 'main', sessionId: 's-root', forkOrigin: null },
+      { name: 'exp', sessionId: 's-child', forkOrigin: { parentSessionId: 's-root', atSeq: endSeqOf(rootTurns, 2) } },
+    ]
+    const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
+    const byId = new Map(graph.nodes.map(node => [node.id, node]))
+    expect(byId.get('s-root:s7.5')?.subject).toBe('exp conclusion')
+    expect(byId.get('s-root:s7.5')?.parentIds).toEqual(['s-root:2', 's-child:1'])
+    expect(byId.get('s-root:3')?.parentIds).toEqual(['s-root:s7.5'])
   })
 
   test('a squash row degrades to single-parent when the child is not a registered branch', async () => {
