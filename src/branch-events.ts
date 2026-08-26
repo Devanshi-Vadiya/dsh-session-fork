@@ -1,6 +1,7 @@
 /**
  * Branch event envelopes: the single, shared way every branch operation
- * (fork, squash, rebased-into) renders an AI-visible provenance message.
+ * (fork, squash, rebased-into, adopt, rename) renders an AI-visible
+ * provenance message.
  *
  * Design contract (agreed 2026-08-22 before the enhance-fork / enhance-squash
  * / implement-rebased-into workstreams forked off):
@@ -35,7 +36,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 
 /** The branch operations that emit AI-visible provenance messages. */
-export type BranchEventKind = 'fork' | 'squash' | 'rebased-into'
+export type BranchEventKind = 'fork' | 'squash' | 'rebased-into' | 'adopt' | 'rename'
 
 /**
  * The facts a branch event states. Every field names durable truth at write
@@ -46,9 +47,13 @@ export type BranchEventKind = 'fork' | 'squash' | 'rebased-into'
 export interface BranchEventFacts {
   /** Which operation this event records. */
   readonly kind: BranchEventKind
-  /** Name of the branch the material came FROM (the child for squash/rebased-into, the parent for fork). */
+  /**
+   * Name of the branch the event came FROM: the parent for fork, the child
+   * for squash/rebased-into, the OLD name for rename, and the adopted
+   * session's id for adopt (it had no branch name until this event).
+   */
   readonly from: string
-  /** Name of the branch this message is written INTO. */
+  /** Name of the branch this message is written INTO (the NEW name for rename). */
   readonly to: string
   /** Fork point: the parent's turn number at which `from` diverged. Present on every event once known. */
   readonly atTurn?: number
@@ -141,6 +146,16 @@ export const branchNoticeLines = {
   /** Written into the PARENT: a branch diverged from you here. */
   forkParent: (facts: BranchEventFacts): string =>
     `Branch "${facts.to}" forked from you at turn ${facts.atTurn ?? '?'}.`,
+  /** Written into the ADOPTED session: you are now a registered root branch (issue #37). */
+  adopted: (facts: BranchEventFacts): string =>
+    `This session is now branch "${facts.to}" — the root branch of this workspace (adopted via /branch adopt). ` +
+    `The conversation is your own work. Treat branch-scoped operations (fork from here, squash into you, ` +
+    `rebased into you) as applying to this session.`,
+  /** Written into the RENAMED branch's session: your branch changed its name (issue #37). */
+  renamed: (facts: BranchEventFacts): string =>
+    `Your branch was renamed: "${facts.from}" is now "${facts.to}". ` +
+    `Use "${facts.to}" in branch commands (/squash into, /rebased into, /branch rm). ` +
+    `Earlier notices may still say "${facts.from}" — they were true when written.`,
 } as const
 
 /** The material noun each envelope kind delivers. */
@@ -148,6 +163,10 @@ const MATERIAL_NOUN: Readonly<Record<BranchEventKind, string>> = {
   fork: 'notice',
   squash: 'summary',
   'rebased-into': 'transcript',
+  // adopt/rename are payload-less facts — they ride `buildBranchNotice`
+  // and never reach the envelope path; the entries keep the Record total.
+  adopt: 'notice',
+  rename: 'notice',
 }
 
 /**
