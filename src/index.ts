@@ -30,7 +30,9 @@ import { executeRebasedIntoAction, parseRebasedIntoAction } from './rebased-into
 import type { RebasedIntoAgent } from './rebased-into-command.js'
 import { executeSquashAction, parseSquashAction } from './squash-command.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { dispatchSquashAction } from './squash-midturn.js'
 import type { SquashChildAgent } from './squash-command.js'
+import type { SquashHandoffDeps } from './squash-midturn.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { compactNow } from './vendor/compact.js'
@@ -106,6 +108,19 @@ export {
   parseSquashAction,
 } from './squash-command.js'
 export type { SquashAction, SquashCommandDeps } from './squash-command.js'
+export {
+  SQUASH_HANDOFF_CAUSE,
+  dispatchSquash,
+  dispatchSquashAction,
+  handoffReport,
+  inboxPendingText,
+  initiateSquashHandoff,
+} from './squash-midturn.js'
+export type {
+  DetachedRunner,
+  SquashHandoffAgent,
+  SquashHandoffDeps,
+} from './squash-midturn.js'
 export { createDomainStore, dshForkDomainSpec } from './store.js'
 export type { DomainLike } from './store.js'
 
@@ -419,6 +434,16 @@ export async function apply(ctx: Context): Promise<void> {
   const domain = await ctx.storageDomain.open(dshForkDomainSpec)
   const active = new Set<Promise<CommandResult>>()
 
+  // Track one detached mid-turn handoff continuation in the same in-flight
+  // set the command operations retire from, so plugin disposal drains a
+  // running compaction too (src/squash-midturn.ts lifetime contract).
+  const trackDetached = (operation: Promise<void>): void => {
+    const tracked = operation as unknown as Promise<CommandResult>
+    active.add(tracked)
+    const retire = (): void => { active.delete(tracked) }
+    void operation.then(retire, retire)
+  }
+
   // Structural read of the host connection registry (the web-app bundle
   // provides the connection service). When absent — a non-web host — the
   // /branch command family still works and only the RPC channel is skipped.
@@ -560,27 +585,36 @@ export async function apply(ctx: Context): Promise<void> {
           resolveTargetAgent: (sessionId) =>
             getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
           flush: (agent) => ctx.sessions.flush(agent.session),
+          trackDetached,
         },
       }
       yield registerRpcChannel(connection, createBranchRpcHandler(rpcPorts))
     }
 
+    // Track one detached mid-turn handoff continuation: see trackDetached
+    // above.
+
     yield ctx.commands.register({
       ...squashCommandDefinition,
       handler: (invocation: CommandInvocation): Promise<CommandResult> => {
         const workspaceKey = invocation.agent.session.header.cwd ?? ''
+        // Mid-turn sources (the agent still running its turn) take the
+        // squash handoff: official turn cancellation, deferred idle
+        // execution, follow-up report (src/squash-midturn.ts). The deps
+        // carry the dispatching request's identity and cancellation.
+        const squashDeps: SquashHandoffDeps = {
+          childAgent: invocation.agent as SquashChildAgent,
+          signal: invocation.signal,
+          ...invocation.commandId === undefined ? {} : { commandId: invocation.commandId },
+          store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+          compact: (agent, signal, request) =>
+            compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
+          resolveTargetAgent: (sessionId) =>
+            getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
+          flush: (agent) => ctx.sessions.flush(agent.session),
+        }
         const operation = Promise.resolve(
-          executeSquashAction(parseSquashAction(invocation.rawInput), {
-            childAgent: invocation.agent as SquashChildAgent,
-            signal: invocation.signal,
-            ...invocation.commandId === undefined ? {} : { commandId: invocation.commandId },
-            store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
-            compact: (agent, signal, request) =>
-              compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
-            resolveTargetAgent: (sessionId) =>
-              getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
-            flush: (agent) => ctx.sessions.flush(agent.session),
-          }),
+          dispatchSquashAction(parseSquashAction(invocation.rawInput), squashDeps, trackDetached),
         ) as Promise<CommandResult>
         active.add(operation)
         const retire = (): void => { active.delete(operation) }

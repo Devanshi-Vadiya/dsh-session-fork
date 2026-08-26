@@ -34,7 +34,7 @@ import type { ArchiveOutcome } from './branch.js'
 import { assembleBranchGraph, extractTurns, summarizeTurnEvents } from './graph.js'
 import type { BranchGraph, BranchLike, GraphNode, GraphNodeRef, GraphSessionLog } from './graph.js'
 import { getBranch, listBranches, removeBranch } from './registry.js'
-import { executeSquash } from './squash-command.js'
+import { dispatchSquash } from './squash-midturn.js'
 import type { SquashChildAgent } from './squash-command.js'
 import type { ForkOrigin, RegistryState, RegistryStore, SessionExists } from './types.js'
 import type { CompactRegionRequest } from './vendor/compact.js'
@@ -181,7 +181,7 @@ export interface RemoveBranchValue {
 /**
  * The squash execution capabilities the `squash` endpoint needs — the same
  * injection face the `/squash` command handler feeds into
- * {@link executeSquash}, minus the command-bound child agent.
+ * {@link dispatchSquash}, minus the command-bound child agent.
  */
 export interface SquashPorts {
   /**
@@ -204,6 +204,12 @@ export interface SquashPorts {
   resolveTargetAgent(sessionId: string): Promise<Agent>
   /** Durability checkpoint for one agent's session (`ctx.sessions.flush`). */
   flush(agent: Agent): Promise<unknown>
+  /**
+   * Track one detached mid-turn handoff continuation (the RPC twin of the
+   * command path's in-flight bookkeeping); when absent the continuation
+   * runs untracked (fire-and-forget with rejection safety).
+   */
+  trackDetached?(operation: Promise<void>): void
 }
 
 /**
@@ -282,7 +288,7 @@ export interface BranchRpcPorts {
  * - `squash` — payload `{ sessionId, target }` (issue #8 right-click
  *   squash): resolves the child agent (live first, cold sessions resume —
  *   never create), then runs the exact `/squash` command pipeline
- *   ({@link executeSquash}) against the named target branch. This stage
+ *   ({@link dispatchSquash}) against the named target branch. This stage
  *   keeps the command's lineage constraint: the target must be the branch
  *   owning the child's parent session. Returns `{ message }` on success;
  *   every failure (busy child/parent, non-parent target, unknown branch)
@@ -360,14 +366,17 @@ export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
         if (childAgent === null) {
           return internalError(`no session named ${JSON.stringify(parsed.data.sessionId)} exists`)
         }
-        const result = await executeSquash(parsed.data.target, {
+        // Mid-turn sources (the branch's agent still running its turn) take
+        // the squash handoff: official turn cancellation, deferred idle
+        // execution, follow-up report (src/squash-midturn.ts).
+        const result = await dispatchSquash(parsed.data.target, {
           childAgent,
           signal,
           store: ports.squash.openStore(workspaceKey),
           compact: ports.squash.compact,
           resolveTargetAgent: ports.squash.resolveTargetAgent,
           flush: ports.squash.flush,
-        })
+        }, ports.squash.trackDetached ?? ((operation) => { void operation.then(() => {}, () => {}) }))
         return result.kind === 'success'
           ? { ok: true, value: { message: result.text ?? '' } satisfies SquashValue }
           : internalError(result.text)
