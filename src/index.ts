@@ -22,17 +22,20 @@ import type {} from '@deepseek-ai/dsh-token-meter'
 import type { ArchiveOutcome, BranchPorts, SourceSessionView } from './branch.js'
 import { BranchArchiveError, BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction, createNamedBranch } from './command.js'
+import type { BranchCommandDeps } from './command.js'
 import { forkSeedNoticeEvent } from './branch.js'
 import { loadRegistry, saveRegistry } from './registry.js'
 import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
 import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
 import { executeRebasedIntoAction, parseRebasedIntoAction } from './rebased-into-command.js'
-import type { RebasedIntoAgent } from './rebased-into-command.js'
+import type { RebasedIntoAgent, RebasedIntoCommandDeps } from './rebased-into-command.js'
 import { executeSquashAction, parseSquashAction } from './squash-command.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { dispatchSquashAction } from './squash-midturn.js'
 import type { SquashChildAgent } from './squash-command.js'
 import type { SquashHandoffDeps } from './squash-midturn.js'
+import { registerBranchTools } from './tools.js'
+import type { BranchToolPorts } from './tools.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { compactNow } from './vendor/compact.js'
@@ -471,19 +474,53 @@ export async function apply(ctx: Context): Promise<void> {
         )
       }
     }
+    // Shared `/branch` execution deps: one construction for the command
+    // handler, the RPC create endpoint, and the tool surface (src/tools.ts).
+    const commandDeps = (
+      sessionId: string,
+      workspaceKey: string,
+    ): BranchCommandDeps => ({
+      currentSessionId: sessionId,
+      store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+      ports: makePorts(ctx),
+      sessionExists: (id: string) => sessionExists(ctx, id),
+      archiveSession: makeArchiveSession(ctx),
+      notifySession,
+    })
+
+    // Shared squash executor deps minus the per-call source/signal/commandId
+    // (src/tools.ts BranchToolPorts.squashBase shape).
+    const squashBase = (
+      workspaceKey: string,
+    ): Omit<SquashHandoffDeps, 'childAgent' | 'signal' | 'commandId'> => ({
+      store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+      compact: (agent, signal, request) =>
+        compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
+      resolveTargetAgent: (sessionId) =>
+        getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
+      flush: (agent) => ctx.sessions.flush(agent.session),
+    })
+
+    // Shared rebased-into executor deps minus the source agent
+    // (src/tools.ts BranchToolPorts.rebasedBase shape).
+    const rebasedBase = (
+      workspaceKey: string,
+    ): Omit<RebasedIntoCommandDeps, 'sourceAgent'> => ({
+      store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+      resolveTargetAgent: (sessionId) =>
+        getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<RebasedIntoAgent>,
+      flush: (agent) => ctx.sessions.flush(agent.session),
+    })
+
     yield ctx.commands.register({
       ...branchCommandDefinition,
       handler: (invocation: CommandInvocation): Promise<CommandResult> => {
         const workspaceKey = invocation.agent.session.header.cwd ?? ''
         const operation = Promise.resolve(
-          executeBranchAction(parseBranchAction(invocation.rawInput), {
-            currentSessionId: invocation.agent.session.id,
-            store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
-            ports: makePorts(ctx),
-            sessionExists: (id) => sessionExists(ctx, id),
-            archiveSession: makeArchiveSession(ctx),
-            notifySession,
-          }),
+          executeBranchAction(
+            parseBranchAction(invocation.rawInput),
+            commandDeps(invocation.agent.session.id, workspaceKey),
+          ),
         ) as Promise<CommandResult>
         active.add(operation)
         const retire = (): void => { active.delete(operation) }
@@ -550,14 +587,11 @@ export async function apply(ctx: Context): Promise<void> {
               `no session named '${sourceSessionId}' exists`,
             )
           }
-          return createNamedBranch(name, {
-            currentSessionId: sourceSessionId,
-            store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
-            ports: makePorts(ctx),
-            sessionExists: (id) => sessionExists(ctx, id),
-            archiveSession: makeArchiveSession(ctx),
-            notifySession,
-          }, atSeq === undefined ? {} : { atSeq })
+          return createNamedBranch(
+            name,
+            commandDeps(sourceSessionId, workspaceKey),
+            atSeq === undefined ? {} : { atSeq },
+          )
         },
         // The right-click squash action (issue #8): the same execution
         // capabilities the /squash command handler injects. Child-agent
@@ -606,12 +640,7 @@ export async function apply(ctx: Context): Promise<void> {
           childAgent: invocation.agent as SquashChildAgent,
           signal: invocation.signal,
           ...invocation.commandId === undefined ? {} : { commandId: invocation.commandId },
-          store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
-          compact: (agent, signal, request) =>
-            compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
-          resolveTargetAgent: (sessionId) =>
-            getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<Agent>,
-          flush: (agent) => ctx.sessions.flush(agent.session),
+          ...squashBase(workspaceKey),
         }
         const operation = Promise.resolve(
           dispatchSquashAction(parseSquashAction(invocation.rawInput), squashDeps, trackDetached),
@@ -636,10 +665,7 @@ export async function apply(ctx: Context): Promise<void> {
         const operation = Promise.resolve(
           executeRebasedIntoAction(parseRebasedIntoAction(invocation.rawInput), {
             sourceAgent: invocation.agent as RebasedIntoAgent,
-            store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
-            resolveTargetAgent: (sessionId) =>
-              getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<RebasedIntoAgent>,
-            flush: (agent) => ctx.sessions.flush(agent.session),
+            ...rebasedBase(workspaceKey),
           }),
         ) as Promise<CommandResult>
         active.add(operation)
@@ -648,6 +674,31 @@ export async function apply(ctx: Context): Promise<void> {
         return operation
       },
     })
+    // The agent-facing tool surface (issue #5): the same executor cores the
+    // three command handlers run, exposed to the model through the official
+    // tools service. Registered host-wide — every session (main or future
+    // subagent) sees the same branch vocabulary.
+    const toolPorts: BranchToolPorts = {
+      command: commandDeps,
+      async branchSessionId(workspaceKey, name) {
+        const state = await loadRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey))
+        return state.branches[name]?.sessionId ?? null
+      },
+      // Live-first source resolution; cold sources resume through the
+      // vendored kernel (resume, never create) — the RPC squash endpoint's
+      // resolveChildAgent contract, generalized to plain agents.
+      async resolveSourceAgent(sessionId) {
+        const live = ctx.agents.get(sessionId as Session['id'])
+        if (live !== undefined) return live
+        if (!(await sessionExists(ctx, sessionId))) return null
+        return getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id'])
+      },
+      squashBase,
+      rebasedBase,
+      trackDetached,
+    }
+    yield registerBranchTools((tool) => ctx.tools.register(tool), toolPorts)
+
     yield async () => { await Promise.allSettled(active) }
     yield async () => { await domain.close() }
   }, 'dsh-session-fork lifecycle')
