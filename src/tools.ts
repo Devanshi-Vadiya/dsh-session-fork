@@ -220,7 +220,54 @@ export function branchToolDefinitions(ports: BranchToolPorts): ToolDefinition[] 
     },
   })
 
-  return [branchList, branchCreate, branchAdopt]
+  const branchRename = defineTool({
+    name: 'branch_rename',
+    description:
+      'Rename a registered branch ref (old name → new name; the registry key only — session data is untouched). '
+      + BRANCH_IS
+      + 'The model-facing form of /branch rename.',
+    parameters: {
+      from: { type: 'string', required: true, description: 'The branch\'s current name.' },
+      to: { type: 'string', required: true, description: 'The branch\'s new name (unique per workspace).' },
+    },
+    output: jsonOutput(),
+    async execute(args, exec) {
+      const caller = callerOf(exec)
+      return 'ok' in caller
+        ? caller
+        : await runBranchAction({ kind: 'rename', from: args.from, to: args.to }, caller, ports)
+    },
+  })
+
+  const branchRemove = defineTool({
+    name: 'branch_remove',
+    description:
+      'Remove a branch ref — the registry record only, NEVER session data (the conversation stays openable as a plain session). '
+      + 'Destructive to the ref, so it mirrors /branch rm --yes: pass confirm=true or the call is refused with no side effects.',
+    parameters: {
+      name: { type: 'string', required: true, description: 'The branch ref to remove.' },
+      confirm: {
+        type: 'boolean',
+        required: true,
+        description: 'Must be true for the removal to run (the --yes parity).',
+      },
+    },
+    output: jsonOutput(),
+    async execute(args, exec) {
+      const caller = callerOf(exec)
+      if ('ok' in caller) return caller
+      if (args.confirm !== true) {
+        return {
+          ok: false,
+          message: 'removal requires an explicit confirmation: call again with confirm=true '
+            + '(removes only the branch ref, never session data)',
+        }
+      }
+      return await runBranchAction({ kind: 'rm', name: args.name, confirmed: true }, caller, ports)
+    },
+  })
+
+  return [branchList, branchCreate, branchAdopt, branchRename, branchRemove]
 }
 
 /**

@@ -147,7 +147,7 @@ describe('tool surface shape', () => {
 
   test('one definition per registry operation, unique names', () => {
     const names = defs.map(tool => tool.name)
-    expect(names).toEqual(['branch_list', 'branch_create', 'branch_adopt'])
+    expect(names).toEqual(['branch_list', 'branch_create', 'branch_adopt', 'branch_rename', 'branch_remove'])
     expect(new Set(names).size).toBe(names.length)
   })
 
@@ -221,5 +221,59 @@ describe('branch_create / branch_adopt', () => {
       message: expect.stringContaining('already exists'),
     })
     expect(h.children.length).toBe(0)
+  })
+})
+
+describe('branch_rename / branch_remove', () => {
+  const seeded = (): RegistryState => ({
+    branches: {
+      main: { name: 'main', sessionId: 's-parent', forkOrigin: null, createdAt: '2026-01-01T00:00:00.000Z' },
+      review: {
+        name: 'review',
+        sessionId: 's-review',
+        forkOrigin: { parentSessionId: 's-parent', atSeq: 7 },
+        createdAt: '2026-01-02T00:00:00.000Z',
+      },
+    },
+  })
+
+  test('rename rewrites the registry key through the real core', async () => {
+    const h = harness(seeded())
+    const defs = branchToolDefinitions(h.ports)
+    const value = await toolBy(defs, 'branch_rename').execute(
+      { from: 'review', to: 'review-2' },
+      execOf(CALLER) as never,
+    )
+    expect(value).toEqual({ ok: true, message: expect.stringContaining('review-2') })
+    const branches = h.store.dump()?.branches ?? {}
+    expect(branches['review']).toBeUndefined()
+    expect(branches['review-2']?.sessionId).toBe('s-review')
+  })
+
+  test('remove without confirm refuses with zero side effects', async () => {
+    const h = harness(seeded())
+    const defs = branchToolDefinitions(h.ports)
+    const value = await toolBy(defs, 'branch_remove').execute(
+      { name: 'review', confirm: false },
+      execOf(CALLER) as never,
+    )
+    expect(value).toEqual({
+      ok: false,
+      message: expect.stringContaining('confirm=true'),
+    })
+    expect(h.store.dump()?.branches['review']).toBeDefined()
+    expect(h.commandCalls.length).toBe(0)
+  })
+
+  test('remove with confirm drops only the registry record', async () => {
+    const h = harness(seeded())
+    const defs = branchToolDefinitions(h.ports)
+    const value = await toolBy(defs, 'branch_remove').execute(
+      { name: 'review', confirm: true },
+      execOf(CALLER) as never,
+    )
+    expect(value).toEqual({ ok: true, message: expect.stringContaining('review') })
+    expect(h.store.dump()?.branches['review']).toBeUndefined()
+    expect(h.store.dump()?.branches['main']).toBeDefined()
   })
 })
