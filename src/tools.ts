@@ -27,9 +27,12 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { executeBranchAction } from './command.js'
 import type { BranchCommandDeps, BranchCommandResult } from './command.js'
+import { dispatchSquash } from './squash-midturn.js'
 import type { SquashHandoffDeps } from './squash-midturn.js'
 import type { DetachedRunner } from './squash-midturn.js'
-import type { RebasedIntoCommandDeps } from './rebased-into-command.js'
+import type { SquashChildAgent } from './squash-command.js'
+import { executeRebasedIntoAction } from './rebased-into-command.js'
+import type { RebasedIntoAgent, RebasedIntoCommandDeps } from './rebased-into-command.js'
 
 /**
  * The host capabilities the tool surface needs, injected by src/index.ts.
@@ -114,16 +117,20 @@ function jsonOutput(): {
  * one agent; the registry guarantees `exec.agent` in agent-driven calls
  * (the tool-agent-team `callingAgent` pattern).
  */
-function callingSession(exec: ToolRunContext): { id: string; cwd: string } | BranchToolValue {
-  const agent = exec.agent
-  if (agent === undefined) {
-    return { ok: false, message: 'no calling agent: this tool runs only inside an agent session' }
-  }
-  return { id: agent.session.id, cwd: agent.session.header.cwd ?? '' }
+const CALLER_MISSING: BranchToolValue = {
+  ok: false,
+  message: 'no calling agent: this tool runs only inside an agent session',
 }
 
-/** Whether a calling-session resolution refused. */
-function isRefusal(value: { id: string; cwd: string } | BranchToolValue): value is BranchToolValue {
+/** Resolve the calling session of one tool call, or refuse canonically. */
+function callerOf(exec: ToolRunContext): Caller | BranchToolValue {
+  const agent = exec.agent
+  if (agent === undefined) return CALLER_MISSING
+  return { sessionId: agent.session.id, workspaceKey: agent.session.header.cwd ?? '', exec }
+}
+
+/** Whether a caller resolution refused. */
+function isRefusal(value: Caller | BranchToolValue): value is BranchToolValue {
   return 'ok' in value
 }
 
@@ -158,14 +165,6 @@ const BRANCH_IS
  * over injected ports — host wiring happens in src/index.ts.
  */
 export function branchToolDefinitions(ports: BranchToolPorts): ToolDefinition[] {
-  /** Resolve the calling session or refuse canonically. */
-  const callerOf = (exec: ToolRunContext): Caller | BranchToolValue => {
-    const session = callingSession(exec)
-    return isRefusal(session)
-      ? session
-      : { sessionId: session.id, workspaceKey: session.cwd, exec }
-  }
-
   const branchList = defineTool({
     name: 'branch_list',
     description:
@@ -271,6 +270,111 @@ export function branchToolDefinitions(ports: BranchToolPorts): ToolDefinition[] 
 }
 
 /**
+ * Resolve an explicit transfer `from` argument: branch name → session id →
+ * agent. Never throws; unknown branch and missing session each return their
+ * canonical refusal (wording shared with the executors' unknown-branch text).
+ */
+async function resolveTransferSource(
+  from: string,
+  caller: Caller,
+  ports: BranchToolPorts,
+): Promise<Agent | BranchToolValue> {
+  const sessionId = await ports.branchSessionId(caller.workspaceKey, from)
+  if (sessionId === null) {
+    return { ok: false, message: `no branch named '${from}' in this workspace` }
+  }
+  const agent = await ports.resolveSourceAgent(sessionId)
+  if (agent === null) {
+    return { ok: false, message: `the session behind branch '${from}' no longer exists` }
+  }
+  return agent
+}
+
+/** Whether a transfer-source resolution refused. */
+function isSourceRefusal(
+  value: Agent | BranchToolValue,
+): value is BranchToolValue {
+  return 'ok' in value
+}
+
+/**
+ * The transfer tools (squash_into / rebased_into). Source defaults to the
+ * calling agent's own branch; an explicit `from` names any registered branch,
+ * resolved live-first with cold sources resuming through the vendored kernel.
+ */
+export function transferToolDefinitions(ports: BranchToolPorts): ToolDefinition[] {
+  const squashInto = defineTool({
+    name: 'squash_into',
+    description:
+      'Squash the source branch\'s conversation into the target branch as ONE summary checkpoint (official compaction form; the target reads it as established background). '
+      + 'Source defaults to the current branch; an explicit from names any registered branch. '
+      + 'A RUNNING source takes the turn handoff: its turn is terminated (official cancel shape, inbox kept), the squash completes at idle, and the source is reactivated with the report — mid-turn self-squash is supported. '
+      + 'The model-facing form of /squash into.',
+    parameters: {
+      into: { type: 'string', required: true, description: 'The target branch that receives the summary.' },
+      from: {
+        type: 'string',
+        description: 'The source branch being squashed (default: the current branch).',
+      },
+    },
+    output: jsonOutput(),
+    async execute(args, exec) {
+      const caller = callerOf(exec)
+      if ('ok' in caller) return caller
+      let childAgent: SquashHandoffDeps['childAgent']
+      if (args.from === undefined) {
+        childAgent = exec.agent as SquashChildAgent
+      } else {
+        const source = await resolveTransferSource(args.from, caller, ports)
+        if (isSourceRefusal(source)) return source
+        childAgent = source as SquashChildAgent
+      }
+      return commandResultToToolValue(
+        await dispatchSquash(
+          args.into,
+          { childAgent, signal: exec.signal, ...ports.squashBase(caller.workspaceKey) },
+          ports.trackDetached,
+        ),
+      )
+    },
+  })
+
+  const rebasedInto = defineTool({
+    name: 'rebased_into',
+    description:
+      'Transfer the source branch\'s own conversation VERBATIM (no summary) into the target branch\'s inbox — the target claims it at its nearest step boundary; a busy target is never a problem. '
+      + 'Source defaults to the current branch, but a RUNNING source is refused (no handoff exists for rebased-into yet) — name an idle branch through from instead. '
+      + 'The model-facing form of /rebased into.',
+    parameters: {
+      into: { type: 'string', required: true, description: 'The target branch whose inbox receives the transcript.' },
+      from: {
+        type: 'string',
+        description: 'The source branch being transferred (default: the current branch; must be idle).',
+      },
+    },
+    output: jsonOutput(),
+    async execute(args, exec) {
+      const caller = callerOf(exec)
+      if ('ok' in caller) return caller
+      let sourceAgent: RebasedIntoAgent = exec.agent as RebasedIntoAgent
+      if (args.from !== undefined) {
+        const source = await resolveTransferSource(args.from, caller, ports)
+        if (isSourceRefusal(source)) return source
+        sourceAgent = source as RebasedIntoAgent
+      }
+      return commandResultToToolValue(
+        await executeRebasedIntoAction(
+          { kind: 'rebased-into', target: args.into },
+          { sourceAgent, ...ports.rebasedBase(caller.workspaceKey) },
+        ),
+      )
+    },
+  })
+
+  return [squashInto, rebasedInto]
+}
+
+/**
  * Register every branch tool on one register callback (host: the dsh tools
  * service). Returns the combined disposer for the plugin's effect chain.
  */
@@ -278,6 +382,7 @@ export function registerBranchTools(
   register: (tool: ToolDefinition) => () => unknown,
   ports: BranchToolPorts,
 ): () => void {
-  const disposers = branchToolDefinitions(ports).map(tool => register(tool))
+  const disposers = [...branchToolDefinitions(ports), ...transferToolDefinitions(ports)]
+    .map(tool => register(tool))
   return () => { for (const dispose of disposers) dispose() }
 }

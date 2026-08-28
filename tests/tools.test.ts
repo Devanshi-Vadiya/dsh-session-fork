@@ -6,10 +6,12 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { branchToolDefinitions, commandResultToToolValue } from '../src/tools.js'
+import { branchToolDefinitions, commandResultToToolValue, registerBranchTools, transferToolDefinitions } from '../src/tools.js'
 import type { BranchToolPorts } from '../src/tools.js'
 import type { SourceEvent, SourceSessionView } from '../src/branch.js'
 import type { RegistryState, RegistryStore } from '../src/types.js'
+import type { SquashHandoffDeps } from '../src/squash-midturn.js'
+import type { RebasedIntoCommandDeps } from '../src/rebased-into-command.js'
 
 const LOG: readonly string[] = [
   'turn/start',
@@ -48,8 +50,8 @@ function memoryStore(): RegistryStore & { dump(): RegistryState | null } {
 }
 
 /** Minimal exec-context stand-in: the tool's view of one calling agent. */
-function execOf(agent?: { session: { id: string; header: { cwd?: string } } }): {
-  agent?: { session: { id: string; header: { cwd?: string } } }
+function execOf(agent?: Record<string, unknown>): {
+  agent?: unknown
   signal: AbortSignal
 } {
   return {
@@ -65,13 +67,18 @@ interface Harness {
   readonly resolvedSources: string[]
   readonly children: string[]
   readonly renames: Array<{ sessionId: string; title: string }>
+  /** Sessions archived through the rm companion (issue #39 semantics). */
+  readonly archives: string[]
   readonly store: ReturnType<typeof memoryStore>
+  squashCalls: number
+  rebasedCalls: number
 }
 
 /**
  * Fake ports with REAL executor deps for the registry operations: the
  * `command` factory returns the same deps shape tests/command.test.ts
- * builds, so branch_list/create/adopt run through the genuine core.
+ * builds, so branch_list/create/adopt run through the genuine core. The
+ * transfer bases default to throwers and can be swapped per test.
  */
 function harness(seedState: RegistryState | null = null): Harness {
   const store = memoryStore()
@@ -81,13 +88,17 @@ function harness(seedState: RegistryState | null = null): Harness {
   const resolvedSources: Harness['resolvedSources'] = []
   const children: string[] = []
   const renames: Harness['renames'] = []
-  return {
+  const archives: Harness['archives'] = []
+  const h: Harness = {
     store,
     commandCalls,
     branchLookups,
     resolvedSources,
     children,
     renames,
+    archives,
+    squashCalls: 0,
+    rebasedCalls: 0,
     ports: {
       command(sessionId, workspaceKey) {
         commandCalls.push({ sessionId, workspaceKey })
@@ -95,6 +106,10 @@ function harness(seedState: RegistryState | null = null): Harness {
           currentSessionId: sessionId,
           store,
           sessionExists: (id: string) => id !== 's-gone',
+          async archiveSession(id) {
+            archives.push(id)
+            return id === 's-gone' ? 'missing' : 'archived'
+          },
           ports: {
             async readSession(sessionId) {
               return sessionId === 's-parent' ? sessionOf('s-parent') : sessionId === 's-cold'
@@ -117,25 +132,46 @@ function harness(seedState: RegistryState | null = null): Harness {
       },
       async resolveSourceAgent(sessionId) {
         resolvedSources.push(sessionId)
-        return null
+        return sessionId === 's-gone' ? null : fakeAgent(sessionId, 'idle')
       },
-      squashBase() {
-        throw new Error('squashBase not reached by the registry-operation tools')
+      squashBase(_workspaceKey) {
+        h.squashCalls += 1
+        return {
+          store,
+          compact: () => { throw new Error('compact not reached by these tests') },
+          resolveTargetAgent: () => { throw new Error('resolveTargetAgent not reached') },
+          flush: () => { throw new Error('flush not reached') },
+        } satisfies Omit<SquashHandoffDeps, 'childAgent' | 'signal' | 'commandId'>
       },
-      rebasedBase() {
-        throw new Error('rebasedBase not reached by the registry-operation tools')
+      rebasedBase(_workspaceKey) {
+        h.rebasedCalls += 1
+        return {
+          store,
+          resolveTargetAgent: () => { throw new Error('resolveTargetAgent not reached') },
+          flush: () => { throw new Error('flush not reached') },
+        } satisfies Omit<RebasedIntoCommandDeps, 'sourceAgent'>
       },
       trackDetached() {
-        throw new Error('trackDetached not reached by the registry-operation tools')
+        /* not reached by these tests */
       },
     },
+  }
+  return h
+}
+
+/** A phase-carrying fake agent, the transfer tools' source shape. */
+function fakeAgent(sessionId: string, phase: 'idle' | 'running'): Record<string, unknown> {
+  return {
+    session: { id: sessionId, header: { cwd: '/w' } },
+    phase: { kind: phase },
+    inbox: { hasPending: false, nextStep: [], nextTurn: [] },
   }
 }
 
 /** The calling agent's session, tool-side. */
 const CALLER = { session: { id: 's-parent', header: { cwd: '/w' } } }
 
-const toolBy = (defs: ReturnType<typeof branchToolDefinitions>, name: string) => {
+const toolBy = (defs: ReturnType<typeof branchToolDefinitions> | ReturnType<typeof transferToolDefinitions>, name: string) => {
   const found = defs.find(tool => tool.name === name)
   if (found === undefined) throw new Error(`tool ${name} not defined`)
   return found
@@ -275,5 +311,103 @@ describe('branch_rename / branch_remove', () => {
     expect(value).toEqual({ ok: true, message: expect.stringContaining('review') })
     expect(h.store.dump()?.branches['review']).toBeUndefined()
     expect(h.store.dump()?.branches['main']).toBeDefined()
+  })
+})
+
+describe('transfer tools: squash_into / rebased_into', () => {
+  const seeded = (): RegistryState => ({
+    branches: {
+      main: { name: 'main', sessionId: 's-parent', forkOrigin: null, createdAt: '2026-01-01T00:00:00.000Z' },
+      review: {
+        name: 'review',
+        sessionId: 's-review',
+        forkOrigin: { parentSessionId: 's-parent', atSeq: 7 },
+        createdAt: '2026-01-02T00:00:00.000Z',
+      },
+    },
+  })
+
+  test('squash_into refuses an unknown from before touching the executor', async () => {
+    const h = harness(seeded())
+    const defs = transferToolDefinitions(h.ports)
+    const value = await toolBy(defs, 'squash_into').execute(
+      { into: 'main', from: 'nope' },
+      execOf(fakeAgent('s-parent', 'idle')) as never,
+    )
+    expect(value).toEqual({ ok: false, message: `no branch named 'nope' in this workspace` })
+    expect(h.squashCalls).toBe(0)
+    expect(h.branchLookups).toEqual(['nope'])
+  })
+
+  test('squash_into resolves a named from through the dispatch core', async () => {
+    const h = harness(seeded())
+    const defs = transferToolDefinitions(h.ports)
+    // Idle resolved source + a target that is NOT registered: the real
+    // precheck's unknown-target refusal proves the whole wiring ran.
+    const value = await toolBy(defs, 'squash_into').execute(
+      { into: 'missing', from: 'review' },
+      execOf(fakeAgent('s-parent', 'idle')) as never,
+    )
+    expect(value).toEqual({ ok: false, message: `no branch named 'missing' in this workspace` })
+    expect(h.resolvedSources).toEqual(['s-review'])
+    expect(h.squashCalls).toBe(1)
+  })
+
+  test('squash_into with a running self-source surfaces the inbox guard', async () => {
+    const h = harness(seeded())
+    const defs = transferToolDefinitions(h.ports)
+    const running = {
+      ...fakeAgent('s-parent', 'running'),
+      inbox: { hasPending: true, nextStep: [{}], nextTurn: [] },
+    }
+    const value = await toolBy(defs, 'squash_into').execute(
+      { into: 'main' },
+      execOf(running) as never,
+    )
+    expect(value).toEqual({ ok: false, message: expect.stringContaining('undelivered inbox message') })
+  })
+
+  test('rebased_into refuses a running default source with the executor text', async () => {
+    const h = harness(seeded())
+    const defs = transferToolDefinitions(h.ports)
+    const value = await toolBy(defs, 'rebased_into').execute(
+      { into: 'main' },
+      execOf(fakeAgent('s-parent', 'running')) as never,
+    )
+    expect(value).toEqual({
+      ok: false,
+      message: 'Rebased-into is unavailable while this branch is not idle.',
+    })
+    expect(h.rebasedCalls).toBe(1)
+  })
+
+  test('rebased_into refuses an unknown from before touching the executor', async () => {
+    const h = harness(seeded())
+    const defs = transferToolDefinitions(h.ports)
+    const value = await toolBy(defs, 'rebased_into').execute(
+      { into: 'main', from: 'nope' },
+      execOf(fakeAgent('s-parent', 'idle')) as never,
+    )
+    expect(value).toEqual({ ok: false, message: `no branch named 'nope' in this workspace` })
+    expect(h.rebasedCalls).toBe(0)
+  })
+})
+
+describe('registerBranchTools', () => {
+  test('registers all seven tools and disposes them together', () => {
+    const h = harness()
+    const registered: string[] = []
+    const disposed: string[] = []
+    const dispose = registerBranchTools((tool) => {
+      registered.push(tool.name)
+      return () => { disposed.push(tool.name) }
+    }, h.ports)
+    expect(registered).toEqual([
+      'branch_list', 'branch_create', 'branch_adopt', 'branch_rename', 'branch_remove',
+      'squash_into', 'rebased_into',
+    ])
+    expect(disposed.length).toBe(0)
+    dispose()
+    expect(disposed).toEqual(registered)
   })
 })
