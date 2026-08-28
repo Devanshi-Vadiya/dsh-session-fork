@@ -8,6 +8,7 @@
 
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { buildBranchNotice, branchNoticeLines } from './branch-events.js'
+import type { BranchEventFacts } from './branch-events.js'
 import type { BranchPorts } from './branch.js'
 import { BranchForkError, createBranchFrom as forkToBranch, createRootBranch as adoptAsRoot } from './branch.js'
 import type { BranchListing, BranchRecord, RegistryState, RegistryStore, SessionExists } from './types.js'
@@ -101,15 +102,16 @@ export interface BranchCommandDeps {
   /** Liveness check for dangling marking. */
   readonly sessionExists: SessionExists
   /**
-   * Parent-side fork notification (issue #28): deliver the one-line notice
-   * into the PARENT session. Called once per successful fork, AFTER the
-   * record is durably written. Contract: this callback never throws — the
-   * fork already succeeded, and a notification failure must surface as a
-   * logged warning, never as a failed `/branch create`. Implementations own
-   * their error handling.
+   * Branch-event notice delivery (issues #28/#37): inject a one-line notice
+   * into ANY session — the forked PARENT, the ADOPTED session, or the
+   * RENAMED branch's session. Called once per successful operation, AFTER
+   * the change is durably written. Contract: this callback never throws —
+   * the operation already succeeded, and a notification failure must
+   * surface as a logged warning, never as a failed command. Implementations
+   * own their error handling.
    */
-  readonly notifyForked?: (
-    parentSessionId: string,
+  readonly notifySession?: (
+    sessionId: string,
     notice: UserMessage,
   ) => Promise<void>
 }
@@ -175,9 +177,9 @@ export async function createNamedBranch(
   await saveRegistry(deps.store, state)
   // Parent notification after the durable write (issue #28): the child's
   // notice already rode the seed; this is the other direction, delivered
-  // through the never-throw `notifyForked` contract.
-  if (deps.notifyForked !== undefined && record.forkOrigin !== null) {
-    await deps.notifyForked(
+  // through the never-throw `notifySession` contract.
+  if (deps.notifySession !== undefined && record.forkOrigin !== null) {
+    await deps.notifySession(
       record.forkOrigin.parentSessionId,
       buildBranchNotice(facts, branchNoticeLines.forkParent(facts)),
     )
@@ -245,6 +247,21 @@ export async function executeBranchAction(
         return { kind: 'error', text: branchErrorMessage(error) }
       }
       await saveRegistry(deps.store, state)
+      // Adoption notice after the durable write (issue #37): the adopted
+      // session learns it IS a branch — same never-throw contract as the
+      // fork parent notice. `from` names the session id: until this event
+      // it had no branch name at all.
+      if (deps.notifySession !== undefined) {
+        const facts: BranchEventFacts = {
+          kind: 'adopt',
+          from: deps.currentSessionId,
+          to: record.name,
+        }
+        await deps.notifySession(
+          deps.currentSessionId,
+          buildBranchNotice(facts, branchNoticeLines.adopted(facts)),
+        )
+      }
       return {
         kind: 'success',
         text: `Branch '${record.name}' → session ${record.sessionId} (root branch, adopted the current session).`,
@@ -275,12 +292,26 @@ export async function executeBranchAction(
 
     case 'rename': {
       let state = await loadRegistry(deps.store)
+      let sessionId: string
       try {
+        // Capture the target BEFORE the rename: the notice goes into the
+        // renamed branch's session, whatever the session is.
+        sessionId = getBranch(state, action.from).sessionId
         state = renameBranch(state, action.from, action.to)
       } catch (error) {
         return { kind: 'error', text: branchErrorMessage(error) }
       }
       await saveRegistry(deps.store, state)
+      // Rename notice after the durable write (issue #37): the session
+      // learns its branch vocabulary changed — old name no longer resolves
+      // in any branch command.
+      if (deps.notifySession !== undefined) {
+        const facts: BranchEventFacts = { kind: 'rename', from: action.from, to: action.to }
+        await deps.notifySession(
+          sessionId,
+          buildBranchNotice(facts, branchNoticeLines.renamed(facts)),
+        )
+      }
       return { kind: 'success', text: `Renamed branch '${action.from}' → '${action.to}'.` }
     }
   }

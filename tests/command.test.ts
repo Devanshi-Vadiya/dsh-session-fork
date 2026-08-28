@@ -56,7 +56,7 @@ interface Harness {
   readonly store: ReturnType<typeof memoryStore>
   readonly children: string[]
   readonly renames: Array<{ sessionId: string; title: string }>
-  readonly notifications: Array<{ parentSessionId: string; text: string; summary: string }>
+  readonly notifications: Array<{ sessionId: string; text: string; summary: string }>
 }
 
 function harness(): Harness {
@@ -88,9 +88,9 @@ function harness(): Harness {
           renames.push({ sessionId, title })
         },
       },
-      async notifyForked(parentSessionId, notice) {
+      async notifySession(sessionId, notice) {
         notifications.push({
-          parentSessionId,
+          sessionId,
           text: (notice.content[0] as { type: 'text'; text: string }).text,
           summary: notice.source.kind === 'plugin' ? notice.source.summary : '',
         })
@@ -162,7 +162,7 @@ describe('executeBranchAction', () => {
     const h = harness()
     await executeBranchAction(parseBranchAction('review'), h.deps)
     expect(h.notifications).toEqual([{
-      parentSessionId: 's-parent',
+      sessionId: 's-parent',
       text: 'Branch "review" forked from you at turn 2.',
       summary: 'fork: s-parent → review',
     }])
@@ -172,12 +172,18 @@ describe('executeBranchAction', () => {
     const h = harness()
     await executeBranchAction(parseBranchAction('adopt main'), h.deps)
     await executeBranchAction(parseBranchAction('review'), h.deps)
-    expect(h.notifications).toHaveLength(1)
-    expect(h.notifications[0]!.text).toBe('Branch "review" forked from you at turn 2.')
+    // Adopt now notifies too (issue #37): first the adoption notice into
+    // the adopted session itself, then the fork parent notice.
+    expect(h.notifications).toHaveLength(2)
+    expect(h.notifications[0]!.text).toBe(
+      'This session is now branch "main" — the root branch of this workspace (adopted via /branch adopt). '
+      + 'The conversation is your own work. Treat branch-scoped operations (fork from here, squash into you, '
+      + 'rebased into you) as applying to this session.',
+    )
+    expect(h.notifications[1]!.text).toBe('Branch "review" forked from you at turn 2.')
     // The fork facts (issue #28) resolved the registry name "main" — the
     // summary's `from` proves the seed notice named the branch, not the id.
-    expect(h.notifications[0]!.summary).toBe('fork: main → review')
-    // adopt itself is a root record: no parent session, no notification.
+    expect(h.notifications[1]!.summary).toBe('fork: main → review')
   })
 
   test('duplicate name is a clear error and registry is unchanged', async () => {
@@ -298,6 +304,24 @@ describe('executeBranchAction', () => {
     expect(h.renames).toEqual([{ sessionId: 's-parent', title: 'main' }])
   })
 
+  test('adopt notifies the adopted session after the durable write', async () => {
+    // Issue #37: adoption tells the model it IS a branch — delivered into
+    // the adopted session itself, through the never-throw channel.
+    const h = harness()
+    const result = await executeBranchAction(parseBranchAction('adopt main'), h.deps)
+    expect(result.kind).toBe('success')
+    expect(h.notifications).toEqual([{
+      sessionId: 's-parent',
+      text:
+        'This session is now branch "main" — the root branch of this workspace (adopted via /branch adopt). '
+        + 'The conversation is your own work. Treat branch-scoped operations (fork from here, squash into you, '
+        + 'rebased into you) as applying to this session.',
+      summary: 'adopt: s-parent → main',
+    }])
+    // The notice rides AFTER the registry write: the ref exists first.
+    expect(h.store.dump()!.branches['main']).toBeDefined()
+  })
+
   test('adopt with a duplicate name is a clear error', async () => {
     const h = harness()
     await executeBranchAction(parseBranchAction('adopt main'), h.deps)
@@ -359,6 +383,40 @@ describe('executeBranchAction', () => {
     const state = h.store.dump()!
     expect(state.branches['c']).toBeDefined()
     expect(state.branches['a']).toBeUndefined()
+  })
+
+  test('rename notifies the renamed branch session after the durable write', async () => {
+    // Issue #37: the renamed branch's session learns the vocabulary change
+    // — from is the OLD name, to the NEW one, old name no longer resolves.
+    const h = harness()
+    await executeBranchAction(parseBranchAction('a'), h.deps)
+    const childSessionId = h.children[0]!
+    const ok = await executeBranchAction(parseBranchAction('rename a c'), h.deps)
+    expect(ok.kind).toBe('success')
+    // The create's fork-parent notice came first; the rename notice is the
+    // last one, addressed to the renamed branch's own session.
+    expect(h.notifications).toHaveLength(2)
+    expect(h.notifications[1]).toEqual({
+      sessionId: childSessionId,
+      text:
+        'Your branch was renamed: "a" is now "c". '
+        + 'Use "c" in branch commands (/squash into, /rebased into, /branch rm). '
+        + 'Earlier notices may still say "a" — they were true when written.',
+      summary: 'rename: a → c',
+    })
+    // The notice rides AFTER the registry write: the new key exists first.
+    expect(h.store.dump()!.branches['c']).toBeDefined()
+  })
+
+  test('a missing notice channel never fails the command', async () => {
+    // `notifySession` is optional: without it the rename succeeds exactly
+    // as before (the never-throw burden sits on implementations, src/index.ts).
+    const h = harness()
+    await executeBranchAction(parseBranchAction('a'), h.deps)
+    const { notifySession: _omitted, ...bare } = h.deps
+    const ok = await executeBranchAction(parseBranchAction('rename a c'), bare)
+    expect(ok.kind).toBe('success')
+    expect(h.store.dump()!.branches['c']).toBeDefined()
   })
 
   test('usage action renders the usage block', async () => {

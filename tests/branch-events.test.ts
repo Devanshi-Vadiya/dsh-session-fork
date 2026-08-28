@@ -36,6 +36,18 @@ const squashFacts: BranchEventFacts = {
   fromSessionId: 'sess-abc',
 }
 
+const adoptFacts: BranchEventFacts = {
+  kind: 'adopt',
+  from: 'sess-abc',
+  to: 'main',
+}
+
+const renameFacts: BranchEventFacts = {
+  kind: 'rename',
+  from: 'main',
+  to: 'develop',
+}
+
 describe('buildBranchNotice', () => {
   test('renders the child line and the structured provenance on the source', () => {
     const message = buildBranchNotice(forkFacts, branchNoticeLines.forkChild(forkFacts))
@@ -64,6 +76,32 @@ describe('buildBranchNotice', () => {
   test('renders the fork-parent line for the diverged parent', () => {
     const message = buildBranchNotice(forkFacts, branchNoticeLines.forkParent(forkFacts))
     expect(text(message)).toBe('Branch "review" forked from you at turn 12.')
+  })
+
+  test('renders the adopt line stating the session is now a root branch (issue #37)', () => {
+    const message = buildBranchNotice(adoptFacts, branchNoticeLines.adopted(adoptFacts))
+    expect(text(message)).toBe(
+      'This session is now branch "main" — the root branch of this workspace (adopted via /branch adopt). '
+      + 'The conversation is your own work. Treat branch-scoped operations (fork from here, squash into you, '
+      + 'rebased into you) as applying to this session.',
+    )
+    expect(message.source).toMatchObject({
+      form: 'notice',
+      branchEvent: { kind: 'adopt', from: 'sess-abc', to: 'main' },
+    })
+  })
+
+  test('renders the rename line stating old and new vocabulary (issue #37)', () => {
+    const message = buildBranchNotice(renameFacts, branchNoticeLines.renamed(renameFacts))
+    expect(text(message)).toBe(
+      'Your branch was renamed: "main" is now "develop". '
+      + 'Use "develop" in branch commands (/squash into, /rebased into, /branch rm). '
+      + 'Earlier notices may still say "main" — they were true when written.',
+    )
+    expect(message.source).toMatchObject({
+      form: 'notice',
+      branchEvent: { kind: 'rename', from: 'main', to: 'develop' },
+    })
   })
 })
 

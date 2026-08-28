@@ -377,22 +377,24 @@ export async function apply(ctx: Context): Promise<void> {
   const connection = ctx.get('connection') as ConnectionRpcLike | undefined
 
   ctx.effect(function* () {
-    // Parent-side fork notification (issue #28): deliver the one-line notice
-    // into the parent session through the agreed transport — `agent.inject()`
-    // (inbox next-step, NO wake): a busy parent receives it at its next step
-    // boundary; an idle parent holds it durably until its next turn. The
-    // agent resolves live-first, cold sources resume through the vendored
-    // ensureSession kernel (resume, never create), and the write is flushed
-    // but the agent never destroyed here. Never throws: the fork has already
-    // succeeded, a notification failure is a logged warning only.
-    const notifyForked = async (parentSessionId: string, notice: UserMessage): Promise<void> => {
+    // Branch-event notice delivery (issues #28/#37): inject a one-line
+    // notice into any session — the forked parent, the adopted session, or
+    // the renamed branch's session — through the agreed transport,
+    // `agent.inject()` (inbox next-step, NO wake): a busy target receives
+    // it at its next step boundary; an idle target holds it durably until
+    // its next turn. The agent resolves live-first, cold sources resume
+    // through the vendored ensureSession kernel (resume, never create), and
+    // the write is flushed but the agent never destroyed here. Never
+    // throws: the branch change has already succeeded, a notification
+    // failure is a logged warning only.
+    const notifySession = async (sessionId: string, notice: UserMessage): Promise<void> => {
       try {
-        const agent = await getOrResumeAgent(getOrResumeDeps(ctx), parentSessionId as Session['id'])
+        const agent = await getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id'])
         agent.inject(notice)
         await ctx.sessions.flush(agent.session)
       } catch (error) {
         ctx.logger.warn(
-          `dsh-session-fork: fork notification to parent "${parentSessionId}" failed: ${String(error)}`,
+          `dsh-session-fork: branch notice to session "${sessionId}" failed: ${String(error)}`,
         )
       }
     }
@@ -406,7 +408,7 @@ export async function apply(ctx: Context): Promise<void> {
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             ports: makePorts(ctx),
             sessionExists: (id) => sessionExists(ctx, id),
-            notifyForked,
+            notifySession,
           }),
         ) as Promise<CommandResult>
         active.add(operation)
@@ -478,7 +480,7 @@ export async function apply(ctx: Context): Promise<void> {
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             ports: makePorts(ctx),
             sessionExists: (id) => sessionExists(ctx, id),
-            notifyForked,
+            notifySession,
           }, atSeq === undefined ? {} : { atSeq })
         },
         // The right-click squash action (issue #8): the same execution
