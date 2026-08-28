@@ -12,7 +12,7 @@ import {
 } from '../src/command.js'
 import type { BranchCommandDeps } from '../src/command.js'
 import type { SourceEvent, SourceSessionView } from '../src/branch.js'
-import { BranchForkError } from '../src/branch.js'
+import { BranchArchiveError, BranchForkError } from '../src/branch.js'
 import type { RegistryState, RegistryStore } from '../src/types.js'
 
 const LOG: readonly string[] = [
@@ -53,22 +53,38 @@ function memoryStore(): RegistryStore & { dump(): RegistryState | null } {
 
 interface Harness {
   readonly deps: BranchCommandDeps
-  readonly store: ReturnType<typeof memoryStore>
+  readonly store: RegistryStore & { dump(): RegistryState | null }
   readonly children: string[]
   readonly renames: Array<{ sessionId: string; title: string }>
   readonly notifications: Array<{ sessionId: string; text: string; summary: string }>
+  /** Ordered archive/save interleaving: proves the archive precedes the registry write. */
+  readonly archiveOps: Array<{ op: 'archive'; sessionId: string } | { op: 'save' }>
 }
 
 function harness(): Harness {
-  const store = memoryStore()
+  const inner = memoryStore()
   const children: string[] = []
   const renames: Array<{ sessionId: string; title: string }> = []
   const notifications: Harness['notifications'] = []
+  const archiveOps: Harness['archiveOps'] = []
+  const store: Harness['store'] = {
+    async load() {
+      return inner.load()
+    },
+    async save(state: RegistryState) {
+      archiveOps.push({ op: 'save' })
+      return inner.save(state)
+    },
+    dump() {
+      return inner.dump()
+    },
+  }
   return {
     store,
     children,
     renames,
     notifications,
+    archiveOps,
     deps: {
       currentSessionId: 's-parent',
       store,
@@ -87,6 +103,10 @@ function harness(): Harness {
         async renameSession(sessionId, title) {
           renames.push({ sessionId, title })
         },
+      },
+      async archiveSession(sessionId) {
+        archiveOps.push({ op: 'archive', sessionId })
+        return sessionId === 's-gone' ? 'missing' : 'archived'
       },
       async notifySession(sessionId, notice) {
         notifications.push({
@@ -347,19 +367,72 @@ describe('executeBranchAction', () => {
     expect(parseBranchAction('adopt a b').kind).toBe('usage')
   })
 
-  test('rm without --yes refuses; with --yes removes only the ref', async () => {
+  test('rm without --yes refuses and states the archive consequence', async () => {
     const h = harness()
     await executeBranchAction(parseBranchAction('review'), h.deps)
     const refused = await executeBranchAction(parseBranchAction('rm review'), h.deps)
     expect(refused.kind).toBe('error')
     if (refused.kind === 'error') {
       expect(refused.text).toContain('--yes')
-      expect(refused.text).toContain('never deleted')
+      expect(refused.text).toContain('archive its session')
+      expect(refused.text).toContain('Session data is kept')
     }
     expect(h.store.dump()!.branches['review']).toBeDefined()
+    // No archive side effect before --yes (the lone save is the create's).
+    expect(h.archiveOps.filter(op => op.op === 'archive')).toEqual([])
+  })
+
+  test('rm --yes archives the session BEFORE the registry write', async () => {
+    const h = harness()
+    await executeBranchAction(parseBranchAction('review'), h.deps)
+    h.archiveOps.length = 0 // drop the create's save; observe the rm act alone
     const removed = await executeBranchAction(parseBranchAction('rm review --yes'), h.deps)
     expect(removed.kind).toBe('success')
+    if (removed.kind === 'success') {
+      expect(removed.text).toContain('archived')
+      expect(removed.text).toContain('review')
+    }
+    // The archived id is exactly the created branch's child session, and
+    // the load-bearing order holds: archive precedes the durable save.
+    expect(h.archiveOps.filter(op => op.op === 'archive'))
+      .toEqual([{ op: 'archive', sessionId: h.children[0]! }])
+    const saveIndex = h.archiveOps.findIndex(op => op.op === 'save')
+    expect(saveIndex).toBe(h.archiveOps.length - 1)
     expect(h.store.dump()!.branches['review']).toBeUndefined()
+  })
+
+  test('rm --yes of a dangling ref skips the archive and still deletes', async () => {
+    const h = harness()
+    await executeBranchAction(parseBranchAction('review'), h.deps)
+    // Force the record dangling: the branch's session no longer exists.
+    const state = h.store.dump()!
+    const record = Object.values(state.branches).find(b => b.name === 'review')!
+    const gone = { ...state, branches: { ...state.branches, review: { ...record, sessionId: 's-gone' } } }
+    await h.store.save(gone)
+    h.archiveOps.length = 0 // drop the fixture write; observe the rm act alone
+    const removed = await executeBranchAction(parseBranchAction('rm review --yes'), h.deps)
+    expect(removed.kind).toBe('success')
+    if (removed.kind === 'success') expect(removed.text).toContain('already missing')
+    expect(h.archiveOps.filter(op => op.op === 'archive')).toEqual([{ op: 'archive', sessionId: 's-gone' }])
+    expect(h.store.dump()!.branches['review']).toBeUndefined()
+  })
+
+  test('rm --yes aborts on archive failure with the registry untouched', async () => {
+    const h = harness()
+    await executeBranchAction(parseBranchAction('review'), h.deps)
+    const state = h.store.dump()!
+    const before = JSON.stringify(state)
+    const failing: typeof h.deps = {
+      ...h.deps,
+      archiveSession: async () => {
+        throw new BranchArchiveError('session archive rejected: storage: boom')
+      },
+    }
+    const result = await executeBranchAction(parseBranchAction('rm review --yes'), failing)
+    expect(result.kind).toBe('error')
+    if (result.kind === 'error') expect(result.text).toContain('archive rejected')
+    expect(JSON.stringify(h.store.dump())).toBe(before) // no save happened
+    expect(h.store.dump()!.branches['review']).toBeDefined()
   })
 
   test('rm of an unknown branch is a clear error', async () => {

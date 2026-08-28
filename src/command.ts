@@ -9,8 +9,8 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { buildBranchNotice, branchNoticeLines } from './branch-events.js'
 import type { BranchEventFacts } from './branch-events.js'
-import type { BranchPorts } from './branch.js'
-import { BranchForkError, createBranchFrom as forkToBranch, createRootBranch as adoptAsRoot } from './branch.js'
+import type { ArchiveOutcome, BranchPorts } from './branch.js'
+import { BranchArchiveError, BranchForkError, createBranchFrom as forkToBranch, createRootBranch as adoptAsRoot } from './branch.js'
 import type { BranchListing, BranchRecord, RegistryState, RegistryStore, SessionExists } from './types.js'
 import {
   BranchRegistryError,
@@ -38,7 +38,7 @@ export const BRANCH_USAGE = [
   '  /branch create <name>     same as /branch <name>',
   '  /branch adopt <name>      adopt the current session as the root branch',
   '  /branch list              list this workspace\'s branches',
-  '  /branch rm <name> --yes   remove a branch ref (never deletes session data)',
+  '  /branch rm <name> --yes   remove a branch ref and archive its session (data is kept)',
   '  /branch rename <old> <new>',
 ].join('\n')
 
@@ -114,6 +114,17 @@ export interface BranchCommandDeps {
     sessionId: string,
     notice: UserMessage,
   ) => Promise<void>
+  /**
+   * Archive one session through the official `workspace.archiveSession`
+   * handler (the `rm` companion): the session disappears from every
+   * grouping surface but keeps its log. Returns `'missing'` for a session
+   * that exists neither live nor in persistence (the dangling-ref case —
+   * the ref is removed without an archive step); infrastructure failures
+   * throw {@link BranchArchiveError} and abort the removal BEFORE the
+   * registry write (the load-bearing order: every fallible side effect
+   * precedes the durable registry mutation).
+   */
+  readonly archiveSession: (sessionId: string) => Promise<ArchiveOutcome>
 }
 
 /** Render one branch listing line. */
@@ -269,25 +280,39 @@ export async function executeBranchAction(
     }
 
     case 'rm': {
-      let state = await loadRegistry(deps.store)
+      const state = await loadRegistry(deps.store)
       if (!action.confirmed) {
         try {
           const record = getBranch(state, action.name)
           return {
             kind: 'error',
-            text: `Refusing to remove branch '${action.name}' (points at ${record.sessionId}). Re-run with --yes to remove the ref. Session data is never deleted.`,
+            text: `Refusing to remove branch '${action.name}' (points at ${record.sessionId}). Re-run with --yes to archive its session and remove the ref. Session data is kept.`,
           }
         } catch {
           return { kind: 'error', text: branchErrorMessage(new BranchLookupFailure(action.name)) }
         }
       }
+      // Order is load-bearing: the archive (the one fallible side effect)
+      // runs BEFORE the registry write, so an archive failure leaves the
+      // branch record untouched and the removal safely retryable. A
+      // `'missing'` outcome (the dangling-ref case) skips the archive —
+      // there is no session to hide, the ref alone goes.
+      let next: RegistryState
+      let outcome: ArchiveOutcome
       try {
-        state = removeBranch(state, action.name)
+        const record = getBranch(state, action.name)
+        outcome = await deps.archiveSession(record.sessionId)
+        next = removeBranch(state, action.name)
       } catch (error) {
         return { kind: 'error', text: branchErrorMessage(error) }
       }
-      await saveRegistry(deps.store, state)
-      return { kind: 'success', text: `Removed branch '${action.name}'. Sessions are untouched.` }
+      await saveRegistry(deps.store, next)
+      return {
+        kind: 'success',
+        text: outcome === 'archived'
+          ? `Removed branch '${action.name}'; its session is archived (data kept, hidden from the sidebar).`
+          : `Removed branch '${action.name}' (session already missing; ref deleted).`,
+      }
     }
 
     case 'rename': {
@@ -326,10 +351,13 @@ class BranchLookupFailure extends BranchRegistryError {
   }
 }
 
-/** Map registry/fork typed errors to user-facing text (commands and the
+/** Map registry/fork/archive typed errors to user-facing text (commands and the
  * GUI `fork` RPC endpoint share this rendering). */
 export function branchErrorMessage(error: unknown): string {
   if (error instanceof BranchForkError) {
+    return error.message
+  }
+  if (error instanceof BranchArchiveError) {
     return error.message
   }
   if (error instanceof BranchRegistryError) {
