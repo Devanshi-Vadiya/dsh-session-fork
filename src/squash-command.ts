@@ -17,6 +17,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { BranchCommandResult } from './command.js'
 import { getBranch, loadRegistry } from './registry.js'
 import { mergeRegion } from './merge-region.js'
+import type { MergeRegionResult } from './merge-region.js'
 import {
   buildMergeCheckpoint,
   extractCheckpointMessage,
@@ -25,7 +26,7 @@ import {
 } from './squash.js'
 import { turnRangeOf } from './squash.js'
 import type { MergeProvenance } from './squash.js'
-import type { RegistryStore } from './types.js'
+import type { RegistryStore, RegistryState } from './types.js'
 import type { CompactRegionRequest } from './vendor/compact.js'
 
 export const SQUASH_USAGE = [
@@ -104,6 +105,62 @@ export async function executeSquashAction(
 }
 
 /**
+ * Everything `/squash` can reject on before compaction begins: target
+ * existence, self-squash, the source's own registration, and the merge
+ * region. Extracted (behavior-identical) from {@link executeSquash} so the
+ * mid-turn handoff (src/squash-midturn.ts) can run the same checks BEFORE
+ * ending the source's running turn — a bad target must not cost the turn.
+ * The failing shape carries the user-facing `text`; the ok shape carries
+ * the resolved target session id, the source branch's registry name, and
+ * the decided merge region.
+ */
+export type SquashPrecheck =
+  | { readonly ok: false; readonly text: string }
+  | {
+    readonly ok: true
+    readonly targetSessionId: string
+    readonly childName: string
+    readonly region: Exclude<MergeRegionResult, { kind: 'error' }>
+  }
+
+/** Run the pre-compaction rejection checks (see {@link SquashPrecheck}). */
+export function precheckSquash(
+  state: RegistryState,
+  childSession: Session,
+  target: string,
+): SquashPrecheck {
+  let targetSessionId: string
+  try {
+    targetSessionId = getBranch(state, target).sessionId
+  } catch {
+    return { ok: false, text: unknownBranch(target) }
+  }
+  if (targetSessionId === childSession.id) {
+    return { ok: false, text: 'cannot squash a branch into itself' }
+  }
+
+  // Branch names are point-in-time facts: resolve them from the registry now,
+  // before building the merge envelope. The target is the registry key the
+  // user named; the source must be a registered branch to be named in the
+  // AI-visible provenance.
+  const childRecord = Object.values(state.branches)
+    .find(record => record.sessionId === childSession.id)
+  const childName = childRecord?.name
+  if (childName === undefined) {
+    return {
+      ok: false,
+      text: 'cannot resolve this session\'s branch name — register the branch before squashing',
+    }
+  }
+
+  const region = mergeRegion(state, childSession, targetSessionId)
+  if (region.kind === 'error') {
+    return { ok: false, text: region.message.replace(/^(?:squash|merge-region):/, 'squash:') }
+  }
+  return { ok: true, targetSessionId, childName, region }
+}
+
+/**
  * The squash pipeline proper (issue #8: extracted so the RPC `squash`
  * endpoint reuses the exact command semantics; issue #21: any two
  * registered branches): idle gate, registry target check, merge-region
@@ -116,7 +173,9 @@ export async function executeSquash(
   deps: SquashCommandDeps,
 ): Promise<BranchCommandResult> {
   // Idle gate: the vendored shell re-checks through runMaintenance, but a
-  // fast local check gives the squash-specific wording immediately.
+  // fast local check gives the squash-specific wording immediately. (The
+  // mid-turn handoff in src/squash-midturn.ts routes running sources here
+  // only once they reach idle.)
   if (deps.childAgent.phase.kind !== 'idle') {
     return { kind: 'error', text: squashErrorText('busy') }
   }
@@ -128,34 +187,11 @@ export async function executeSquash(
   const childSession = deps.childAgent.session as Session
 
   const state = await loadRegistry(deps.store)
-  let targetSessionId: string
-  try {
-    targetSessionId = getBranch(state, target).sessionId
-  } catch {
-    return { kind: 'error', text: unknownBranch(target) }
+  const precheck = precheckSquash(state, childSession, target)
+  if (!precheck.ok) {
+    return { kind: 'error', text: precheck.text }
   }
-  if (targetSessionId === childSession.id) {
-    return { kind: 'error', text: 'cannot squash a branch into itself' }
-  }
-
-  // Branch names are point-in-time facts: resolve them from the registry now,
-  // before building the merge envelope. The target is the registry key the
-  // user named; the source must be a registered branch to be named in the
-  // AI-visible provenance.
-  const childRecord = Object.values(state.branches)
-    .find(record => record.sessionId === childSession.id)
-  const childName = childRecord?.name
-  if (childName === undefined) {
-    return {
-      kind: 'error',
-      text: 'cannot resolve this session\'s branch name — register the branch before squashing',
-    }
-  }
-
-  const region = mergeRegion(state, childSession, targetSessionId)
-  if (region.kind === 'error') {
-    return { kind: 'error', text: region.message.replace(/^(?:squash|merge-region):/, 'squash:') }
-  }
+  const { targetSessionId, childName, region } = precheck
 
   let result: CompactionResult
   try {
