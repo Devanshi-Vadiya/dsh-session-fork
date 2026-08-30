@@ -42,6 +42,34 @@ export class BranchForkError extends Error {
   }
 }
 
+/**
+ * Typed failure of a session-archive operation (the `rm` companion). The
+ * official `workspace.archiveSession` handler rejects sessions that are
+ * neither live nor persisted with `session-not-found`; the host adapter
+ * maps that onto the `'missing'` outcome instead of throwing, so only
+ * infrastructure failures (an unmounted gateway, storage errors) raise
+ * this class.
+ */
+export class BranchArchiveError extends Error {
+  /** Machine-readable failure code. */
+  readonly code: 'archive-failed'
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'BranchArchiveError'
+    this.code = 'archive-failed'
+  }
+}
+
+/**
+ * Outcome of archiving one session through the official handler:
+ * `'archived'` when the session joined the archive set (idempotent — an
+ * already-archived session archives again), `'missing'` when the session
+ * exists neither live nor in persistence (the dangling-ref case: the ref
+ * is removed without an archive step).
+ */
+export type ArchiveOutcome = 'archived' | 'missing'
+
 /** The event fields fork-boundary logic needs from one session event. */
 export interface SourceEvent {
   /** Position of the event in its session log (0-based, contiguous). */

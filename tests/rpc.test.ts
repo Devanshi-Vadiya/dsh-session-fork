@@ -21,6 +21,8 @@ import {
   type RpcHandler,
   type SquashPorts,
 } from '../src/rpc.ts'
+import { BranchArchiveError } from '../src/branch.ts'
+import type { ArchiveOutcome } from '../src/branch.ts'
 import type { RegistryState, RegistryStore } from '../src/types.ts'
 
 interface HandleCall {
@@ -58,21 +60,29 @@ interface PortsHarness {
   readonly ports: BranchRpcPorts
   readonly resolveCalls: string[]
   readonly loadCalls: string[]
+  /** Archive calls recorded by the default fake, in call order. */
+  readonly archiveCalls: string[]
   /** Workspaces written through the `saveRegistry` port, keyed by workspace key. */
   readonly savedWorkspaces: Record<string, RegistryState>
 }
 
-function portsHarness(options: {
-  readonly workspaces: Record<string, RegistryState>
-  readonly resolve: (sessionId: string) => string | null
-  readonly squash?: SquashPorts
-}): PortsHarness {
+function portsHarness(
+  options: {
+    readonly workspaces: Record<string, RegistryState>
+    readonly resolve: (sessionId: string) => string | null
+    readonly squash?: SquashPorts
+    /** Overrides the default archive fake (which records and mirrors liveness). */
+    readonly archiveSession?: (sessionId: string) => Promise<ArchiveOutcome>
+  },
+): PortsHarness {
   const resolveCalls: string[] = []
   const loadCalls: string[] = []
+  const archiveCalls: string[] = []
   const savedWorkspaces: Record<string, RegistryState> = {}
   return {
     resolveCalls,
     loadCalls,
+    archiveCalls,
     savedWorkspaces,
     ports: {
       async resolveWorkspaceKey(sessionId) {
@@ -89,6 +99,11 @@ function portsHarness(options: {
       },
       sessionExists(id) {
         return id !== 's-gone'
+      },
+      async archiveSession(sessionId) {
+        archiveCalls.push(sessionId)
+        if (options.archiveSession !== undefined) return options.archiveSession(sessionId)
+        return sessionId === 's-gone' ? 'missing' : 'archived'
       },
       // Squash port defaults: nothing resolves — the squash describe
       // injects the full fake pipeline.
@@ -257,6 +272,9 @@ describe('createBranchRpcHandler', () => {
       sessionExists() {
         return true
       },
+      async archiveSession() {
+        return 'archived'
+      },
     }
     const handler = createBranchRpcHandler(ports)
     const result = await handler('registry', { sessionId: 's-live' })
@@ -268,31 +286,62 @@ describe('createBranchRpcHandler', () => {
 })
 
 describe('createBranchRpcHandler: removeBranch endpoint', () => {
-  test('removes the ref only and persists the workspace registry (command wording)', async () => {
-    const { ports, savedWorkspaces } = portsHarness({
+  test('removing a live branch archives its session, then persists (command wording)', async () => {
+    const { ports, savedWorkspaces, archiveCalls } = portsHarness({
       workspaces: { '/work': WORKSPACE },
-      resolve: (id) => (id === 's-live' ? '/work' : null),
+      resolve: (id) => (id === 's-live' || id === 's-main' ? '/work' : null),
+    })
+    const handler = createBranchRpcHandler(ports)
+    const result = await handler('removeBranch', { sessionId: 's-live', name: 'main' })
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        message: `Removed branch 'main'; its session is archived (data kept, hidden from the sidebar).`,
+      },
+    })
+    expect(archiveCalls).toEqual(['s-main'])
+    expect(Object.keys(savedWorkspaces['/work'].branches)).toEqual(['exp'])
+  })
+
+  test('dangling refs are removable the same way (archive skipped, ref deleted)', async () => {
+    const { ports, savedWorkspaces, archiveCalls } = portsHarness({
+      workspaces: { '/work': WORKSPACE },
+      resolve: (id) => (id === 's-live' || id === 's-gone' ? '/work' : null),
     })
     const handler = createBranchRpcHandler(ports)
     const result = await handler('removeBranch', { sessionId: 's-live', name: 'exp' })
     expect(result).toEqual({
       ok: true,
-      value: { message: `Removed branch 'exp'. Sessions are untouched.` },
+      value: {
+        message: `Removed branch 'exp' (session already missing; ref deleted).`,
+      },
     })
-    // The dangling ref (exp → s-gone) is gone; the live ref stays; the
-    // saved state is the whole-workspace record minus the removed ref.
+    // The archive port still reports the missing session; the registry
+    // write happens regardless — the ref alone goes.
+    expect(archiveCalls).toEqual(['s-gone'])
     expect(Object.keys(savedWorkspaces['/work'].branches)).toEqual(['main'])
   })
 
-  test('dangling refs are removable the same way', async () => {
-    const { ports, savedWorkspaces } = portsHarness({
+  test('an archive failure aborts with the command-layer wording, registry untouched', async () => {
+    const { ports, savedWorkspaces, archiveCalls } = portsHarness({
       workspaces: { '/work': WORKSPACE },
-      resolve: (id) => (id === 's-gone' ? '/work' : null),
+      resolve: () => '/work',
+      archiveSession: async () => {
+        throw new BranchArchiveError('session archive rejected: storage: boom')
+      },
     })
     const handler = createBranchRpcHandler(ports)
-    const result = await handler('removeBranch', { sessionId: 's-gone', name: 'exp' })
-    expect(result.ok).toBe(true)
-    expect(savedWorkspaces['/work'].branches.exp).toBeUndefined()
+    const result = await handler('removeBranch', { sessionId: 's-live', name: 'main' })
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'session archive rejected: storage: boom',
+        details: {},
+      },
+    })
+    expect(archiveCalls).toEqual(['s-main'])
+    expect(savedWorkspaces['/work']).toBeUndefined()
   })
 
   test('unknown branch names carry the command-layer wording without saving', async () => {
@@ -351,6 +400,9 @@ describe('createBranchRpcHandler: fork endpoint', () => {
       },
       sessionExists() {
         return true
+      },
+      async archiveSession() {
+        return 'archived'
       },
       createBranch,
     }

@@ -19,8 +19,8 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-token-meter'
-import type { BranchPorts, SourceSessionView } from './branch.js'
-import { BranchForkError } from './branch.js'
+import type { ArchiveOutcome, BranchPorts, SourceSessionView } from './branch.js'
+import { BranchArchiveError, BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction, createNamedBranch } from './command.js'
 import { forkSeedNoticeEvent } from './branch.js'
 import { loadRegistry, saveRegistry } from './registry.js'
@@ -166,6 +166,54 @@ interface ApiProxySessionsLike {
   }): Promise<{
     result: { ok: boolean; value?: { title: string; seq: number }; error?: { code: string; message: string } }
   }>
+}
+
+/**
+ * Structural slice of `ctx.apiProxy.workspace` relied on: the official
+ * `workspace.archiveSession` handler only. In-process, same gateway as the
+ * web GUI — the session joins the registry-global archive set (hidden from
+ * every grouping surface, log and workspace slot kept). Business codes:
+ * `session-not-found` for a session neither live nor persisted; anything
+ * else is an internal failure.
+ */
+interface ApiProxyWorkspaceLike {
+  archiveSession(request: {
+    rpcId: string
+    payload: { sessionId: Session['id'] }
+  }): Promise<{
+    result: { ok: boolean; value?: { archivedSessionIds: string[] }; error?: { code: string; message: string } }
+  }>
+}
+
+/**
+ * The `rm` companion over the official archive handler: returns `'missing'`
+ * for the `session-not-found` business rejection (the dangling-ref case —
+ * nothing to archive, the ref alone goes) and `'archived'` otherwise; an
+ * unmounted gateway or a non-business rejection raises
+ * {@link BranchArchiveError} so the command layer aborts BEFORE the
+ * registry write.
+ */
+function makeArchiveSession(ctx: Context): (sessionId: string) => Promise<ArchiveOutcome> {
+  return async (sessionId) => {
+    const api = (ctx.get('apiProxy') as { workspace?: ApiProxyWorkspaceLike } | undefined)?.workspace
+    if (api === undefined) {
+      throw new BranchArchiveError(
+        'the api-proxy gateway is not mounted in this deployment',
+      )
+    }
+    const response = await api.archiveSession({
+      rpcId: `dsh-session-fork:archive:${sessionId}`,
+      payload: { sessionId: sessionId as Session['id'] },
+    })
+    if (!response.result.ok) {
+      const error = response.result.error
+      if (error?.code === 'session-not-found') return 'missing'
+      throw new BranchArchiveError(
+        `session archive rejected: ${error?.code ?? 'unknown'}: ${error?.message ?? 'no message'}`,
+      )
+    }
+    return 'archived'
+  }
 }
 
 /** Build the fork ports over live-first session reads. */
@@ -408,6 +456,7 @@ export async function apply(ctx: Context): Promise<void> {
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             ports: makePorts(ctx),
             sessionExists: (id) => sessionExists(ctx, id),
+            archiveSession: makeArchiveSession(ctx),
             notifySession,
           }),
         ) as Promise<CommandResult>
@@ -464,6 +513,7 @@ export async function apply(ctx: Context): Promise<void> {
           }
         },
         sessionExists: (id) => sessionExists(ctx, id),
+        archiveSession: makeArchiveSession(ctx),
         // The hijacked fork button's write path: the exact /branch create
         // pipeline, with the source session's workspace registry as the
         // authority. A missing source fails before any store selection.
@@ -480,6 +530,7 @@ export async function apply(ctx: Context): Promise<void> {
             store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
             ports: makePorts(ctx),
             sessionExists: (id) => sessionExists(ctx, id),
+            archiveSession: makeArchiveSession(ctx),
             notifySession,
           }, atSeq === undefined ? {} : { atSeq })
         },

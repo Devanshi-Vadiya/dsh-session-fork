@@ -30,9 +30,10 @@ import { z } from 'zod'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import { branchErrorMessage } from './command.js'
+import type { ArchiveOutcome } from './branch.js'
 import { assembleBranchGraph, extractTurns, summarizeTurnEvents } from './graph.js'
 import type { BranchGraph, BranchLike, GraphNode, GraphNodeRef, GraphSessionLog } from './graph.js'
-import { listBranches, removeBranch } from './registry.js'
+import { getBranch, listBranches, removeBranch } from './registry.js'
 import { executeSquash } from './squash-command.js'
 import type { SquashChildAgent } from './squash-command.js'
 import type { ForkOrigin, RegistryState, RegistryStore, SessionExists } from './types.js'
@@ -230,6 +231,14 @@ export interface BranchRpcPorts {
   /** Liveness check used for dangling marking. */
   readonly sessionExists: SessionExists
   /**
+   * Archive one session through the official `workspace.archiveSession`
+   * handler (the `removeBranch` endpoint's companion): `'missing'` for a
+   * session neither live nor persisted (dangling ref — no archive step);
+   * infrastructure failures throw with the command-layer wording and
+   * abort the removal before the registry write.
+   */
+  archiveSession(sessionId: string): Promise<ArchiveOutcome>
+  /**
    * Create a named branch fork — the `/branch create` pipeline
    * ({@link createNamedBranch}) with the source session's workspace
    * registry as the authority. Serves the `fork` endpoint the hijacked
@@ -279,11 +288,13 @@ export interface BranchRpcPorts {
  *   every failure (busy child/parent, non-parent target, unknown branch)
  *   carries the pipeline's user-facing wording.
  * - `removeBranch` — payload `{ sessionId, name }` (issue #23 GUI remove):
- *   the exact `/branch rm --yes` registry semantics over the RPC face —
- *   delete the named ref only, never session data; dangling refs are
- *   removable the same way (their sessions are gone, the ref stays until
- *   explicitly removed). Returns `{ message }` on success; unknown names
- *   carry the command's user-facing wording.
+ *   the exact `/branch rm --yes` semantics over the RPC face — archive the
+ *   named branch's session (official handler, data kept), then delete the
+ *   ref; a session that exists neither live nor on disk (a dangling ref)
+ *   skips the archive. The confirmation lives client-side (the official
+ *   RiskConfirmation checkbox gates this call). Returns `{ message }` on
+ *   success; unknown names and archive failures carry the command's
+ *   user-facing wording.
  *
  * Anything else — unknown endpoints, malformed payloads, missing sessions,
  * thrown port failures — folds into `{ ok: false, error: { code: 'internal',
@@ -295,9 +306,11 @@ export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
     if (endpoint === 'removeBranch') {
       // The GUI remove action (issue #23): the `/branch rm --yes`
       // semantics — the confirmation lives client-side (the official
-      // RiskConfirmation checkbox gates this call), and the host deletes
-      // the ref only. Dangling refs are removable identically: the
-      // registry transform never consults session liveness.
+      // RiskConfirmation checkbox gates this call), and the host archives
+      // the session (the one fallible side effect, BEFORE the registry
+      // write — an archive failure leaves the ref in place and the removal
+      // retryable) and deletes the ref. Dangling refs are removable
+      // identically: the archive returns 'missing' and the ref alone goes.
       try {
         const parsed = removeBranchPayloadSchema.safeParse(payload)
         if (!parsed.success) {
@@ -311,10 +324,13 @@ export function createBranchRpcHandler(ports: BranchRpcPorts): RpcHandler {
           return internalError(`no session named ${JSON.stringify(parsed.data.sessionId)} exists`)
         }
         const state = await ports.loadRegistry(workspaceKey)
+        const outcome = await ports.archiveSession(getBranch(state, parsed.data.name).sessionId)
         const next = removeBranch(state, parsed.data.name) // throws on unknown names
         await ports.saveRegistry(workspaceKey, next)
         const value: RemoveBranchValue = {
-          message: `Removed branch '${parsed.data.name}'. Sessions are untouched.`,
+          message: outcome === 'archived'
+            ? `Removed branch '${parsed.data.name}'; its session is archived (data kept, hidden from the sidebar).`
+            : `Removed branch '${parsed.data.name}' (session already missing; ref deleted).`,
         }
         return { ok: true, value }
       } catch (error) {
