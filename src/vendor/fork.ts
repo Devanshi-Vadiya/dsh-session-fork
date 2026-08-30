@@ -11,9 +11,10 @@
  * - packages/host/apiproxy/src/api-proxy.ts:1196-1217 — `composeAgent`
  *   helper (resolve the preset before creation; mount it in setup).
  *
- * The handler's `resolveSessionPreset` helper is deliberately NOT vendored:
- * it is publicly exported by @deepseek-ai/dsh-agent-presets and imported
- * directly (optional peer dependency) — direct import beats copying.
+ * The handler's `resolveSessionPreset` helper lives in
+ * ./resolve-session-preset.ts: upstream removed the export in b8dfa8b892
+ * (agentPreset projection replaced it), so the helper is vendored there with
+ * its own VENDORED FROM header.
  *
  * `getOrResumeAgent` at the end of this file is a later addition carrying its
  * own VENDORED FROM header (deepseek-harness@528c682e…, api-proxy.ts:1078 +
@@ -31,7 +32,7 @@
  */
 
 import type { SourceEvent } from '../branch.js'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
+import { resolveSessionPreset } from './resolve-session-preset.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'

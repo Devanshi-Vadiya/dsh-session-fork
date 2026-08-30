@@ -9,7 +9,6 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
-import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 // Type-only presence import: pulls in this package's Context augmentation
 // (`ctx.sessionPersistence`) without any runtime dependency on it.
@@ -39,6 +38,7 @@ import type { BranchToolPorts } from './tools.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { compactNow } from './vendor/compact.js'
+import { resolveSessionPreset } from './vendor/resolve-session-preset.js'
 import { composeAgent, forkWorkspace, getOrResumeAgent, getOrResumeDeps } from './vendor/fork.js'
 import type { AgentPresetsLike, WorkspaceLike } from './vendor/fork.js'
 
@@ -138,7 +138,7 @@ export const inject = [
   'agents',
   'tokenMeter',
   'llm',
-  'apiProxy',
+  'sessionController',
   'connection',
 ]
 
@@ -171,36 +171,31 @@ interface SessionQueryLike {
 }
 
 /**
- * Structural slice of `ctx.apiProxy.sessions` relied on: the official
- * `session.rename` handler only. Calling it in-process drives the same
- * gateway instance (and the same SessionTitleService behind it) as the web
- * GUI's rename dialog; the result is the standard RPC shape —
- * `result.ok` true with `{ title, seq }`, or false with a coded error.
+ * Structural slice of `ctx.sessionController` relied on: the official
+ * `session.rename` command only. Calling it in-process drives the same
+ * command object (and the same SessionTitleService behind it) as the web
+ * GUI's rename dialog; a rejection surfaces as a `TypertRemoteFailure`
+ * whose `.failure` carries the coded `{ code, message }` pair.
  */
-interface ApiProxySessionsLike {
+interface SessionControllerLike {
   rename(request: {
-    rpcId: string
-    payload: { sessionId: Session['id']; title: string }
-  }): Promise<{
-    result: { ok: boolean; value?: { title: string; seq: number }; error?: { code: string; message: string } }
-  }>
+    sessionId: Session['id']
+    title: string
+  }): Promise<{ title: string; seq: number }>
 }
 
 /**
- * Structural slice of `ctx.apiProxy.workspace` relied on: the official
- * `workspace.archiveSession` handler only. In-process, same gateway as the
- * web GUI — the session joins the registry-global archive set (hidden from
- * every grouping surface, log and workspace slot kept). Business codes:
+ * Structural slice of `ctx.workspaceController` relied on: the official
+ * `archiveSession` remote only. In-process, same gateway as the web GUI —
+ * the session joins the registry-global archive set (hidden from every
+ * grouping surface, log and workspace slot kept). Business codes:
  * `session-not-found` for a session neither live nor persisted; anything
  * else is an internal failure.
  */
-interface ApiProxyWorkspaceLike {
+interface WorkspaceControllerLike {
   archiveSession(request: {
-    rpcId: string
-    payload: { sessionId: Session['id'] }
-  }): Promise<{
-    result: { ok: boolean; value?: { archivedSessionIds: string[] }; error?: { code: string; message: string } }
-  }>
+    sessionId: Session['id']
+  }): Promise<{ archivedSessionIds: readonly string[] }>
 }
 
 /**
@@ -213,21 +208,19 @@ interface ApiProxyWorkspaceLike {
  */
 function makeArchiveSession(ctx: Context): (sessionId: string) => Promise<ArchiveOutcome> {
   return async (sessionId) => {
-    const api = (ctx.get('apiProxy') as { workspace?: ApiProxyWorkspaceLike } | undefined)?.workspace
-    if (api === undefined) {
+    const controller = ctx.get('workspaceController') as WorkspaceControllerLike | undefined
+    if (controller === undefined) {
       throw new BranchArchiveError(
-        'the api-proxy gateway is not mounted in this deployment',
+        'the workspace controller is not mounted in this deployment',
       )
     }
-    const response = await api.archiveSession({
-      rpcId: `dsh-session-fork:archive:${sessionId}`,
-      payload: { sessionId: sessionId as Session['id'] },
-    })
-    if (!response.result.ok) {
-      const error = response.result.error
-      if (error?.code === 'session-not-found') return 'missing'
+    try {
+      await controller.archiveSession({ sessionId: sessionId as Session['id'] })
+    } catch (error) {
+      const failure = (error as { failure?: { code?: string; message?: string } }).failure
+      if (failure?.code === 'session-not-found') return 'missing'
       throw new BranchArchiveError(
-        `session archive rejected: ${error?.code ?? 'unknown'}: ${error?.message ?? 'no message'}`,
+        `session archive rejected: ${failure?.code ?? 'unknown'}: ${failure?.message ?? String(error)}`,
       )
     }
     return 'archived'
@@ -333,27 +326,25 @@ function makePorts(ctx: Context): BranchPorts {
       await workspace?.attachSession(childId)
     },
     async renameSession(sessionId, title) {
-      // The official rename handler, in process. The registry gate has
+      // The official rename command, in process. The registry gate has
       // already proved the official normalizer holds this title to
-      // identity, so an error result here is an internal anomaly — map it
+      // identity, so a rejection here is an internal anomaly — map it
       // onto BranchForkError so the command layer renders it like every
       // other branch-operation failure.
-      const api = (ctx.get('apiProxy') as { sessions?: ApiProxySessionsLike } | undefined)?.sessions
-      if (api === undefined) {
+      const controller = ctx.get('sessionController') as SessionControllerLike | undefined
+      if (controller === undefined) {
         throw new BranchForkError(
           'rename-failed',
-          'the api-proxy gateway is not mounted in this deployment',
+          'the session controller is not mounted in this deployment',
         )
       }
-      const response = await api.rename({
-        rpcId: `dsh-session-fork:rename:${sessionId}`,
-        payload: { sessionId: sessionId as Session['id'], title },
-      })
-      if (!response.result.ok) {
-        const error = response.result.error
+      try {
+        await controller.rename({ sessionId: sessionId as Session['id'], title })
+      } catch (error) {
+        const failure = (error as { failure?: { code?: string; message?: string } }).failure
         throw new BranchForkError(
           'rename-failed',
-          `session rename rejected: ${error?.code ?? 'unknown'}: ${error?.message ?? 'no message'}`,
+          `session rename rejected: ${failure?.code ?? 'unknown'}: ${failure?.message ?? String(error)}`,
         )
       }
     },

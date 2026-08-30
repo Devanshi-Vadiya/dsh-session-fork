@@ -96,11 +96,11 @@ export interface SourceSessionView {
  *   with `meta.parentSession`/`seedLength` plus workspace attach, the exact
  *   path the web GUI's fork button takes. Used for live and cold sources
  *   alike.
- * - `renameSession` — the official `session.rename` handler through the
- *   injected `ctx.apiProxy` gateway, in process (same instance the web GUI's
- *   rename dialog drives). Called only after the registry gate
- *   (`assertValidName`) has proved the official normalizer holds the title
- *   to identity, so the rename is deterministic.
+ * - `renameSession` — the official `session.rename` command through the
+ *   injected `ctx.sessionController` service, in process (same command
+ *   object the web GUI's rename dialog reaches over the gateway). Called
+ *   only after the registry gate (`assertValidName`) has proved the official
+ *   normalizer holds the title to identity, so the rename is deterministic.
  */
 export interface BranchPorts {
   readSession(sessionId: string): Promise<SourceSessionView | null>
