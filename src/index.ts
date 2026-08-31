@@ -43,6 +43,13 @@ import {
   BRANCH_VOCABULARY_ORDER,
   BRANCH_VOCABULARY_SECTION,
 } from './prompt.js'
+import {
+  BRANCH_IDENTITY_ORDER,
+  BRANCH_IDENTITY_SECTION,
+  branchIdentityProvider,
+  createBranchIdentity,
+  identityTrackingStore,
+} from './branch-identity.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { compactNow } from './vendor/compact.js'
@@ -438,6 +445,26 @@ export async function apply(ctx: Context): Promise<void> {
   const domain = await ctx.storageDomain.open(dshForkDomainSpec)
   const active = new Set<Promise<CommandResult>>()
 
+  // Ambient branch identity (issue #28 phase 2): the sync read plane behind
+  // the identity prompt section. Warmed once at plugin start so the FIRST
+  // assembly of an already-registered session is correct; a warm failure is
+  // a logged warning only — the section then degrades to no line until the
+  // miss-triggered refresh succeeds.
+  const identity = createBranchIdentity(domain as unknown as DomainLike)
+  void identity.refresh().catch((error: unknown) => {
+    ctx.logger.warn(`dsh-session-fork: branch identity warm-up failed: ${String(error)}`)
+  })
+
+  // Every registry store this plugin hands out, wrapped so each successful
+  // save mirrors into the identity cache — one choke point for every
+  // mutation path (command, GUI RPC, tools) keeps the prompt honest.
+  const openStore = (workspaceKey: string) =>
+    identityTrackingStore(
+      createDomainStore(domain as unknown as DomainLike, workspaceKey),
+      workspaceKey,
+      identity,
+    )
+
   // Track one detached mid-turn handoff continuation in the same in-flight
   // set the command operations retire from, so plugin disposal drains a
   // running compaction too (src/squash-midturn.ts lifetime contract).
@@ -482,7 +509,7 @@ export async function apply(ctx: Context): Promise<void> {
       workspaceKey: string,
     ): BranchCommandDeps => ({
       currentSessionId: sessionId,
-      store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+      store: openStore(workspaceKey),
       ports: makePorts(ctx),
       sessionExists: (id: string) => sessionExists(ctx, id),
       archiveSession: makeArchiveSession(ctx),
@@ -494,7 +521,7 @@ export async function apply(ctx: Context): Promise<void> {
     const squashBase = (
       workspaceKey: string,
     ): Omit<SquashHandoffDeps, 'childAgent' | 'signal' | 'commandId'> => ({
-      store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+      store: openStore(workspaceKey),
       compact: (agent, signal, request) =>
         compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
       resolveTargetAgent: (sessionId) =>
@@ -507,7 +534,7 @@ export async function apply(ctx: Context): Promise<void> {
     const rebasedBase = (
       workspaceKey: string,
     ): Omit<RebasedIntoCommandDeps, 'sourceAgent'> => ({
-      store: createDomainStore(domain as unknown as DomainLike, workspaceKey),
+      store: openStore(workspaceKey),
       resolveTargetAgent: (sessionId) =>
         getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<RebasedIntoAgent>,
       flush: (agent) => ctx.sessions.flush(agent.session),
@@ -536,12 +563,12 @@ export async function apply(ctx: Context): Promise<void> {
         resolveWorkspaceKey: (sessionId) => resolveWorkspaceKey(ctx, sessionId),
         // One domain record per workspace, exactly like the /branch path.
         async loadRegistry(workspaceKey) {
-          return loadRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey))
+          return loadRegistry(openStore(workspaceKey))
         },
         // The `removeBranch` endpoint's write path: the same domain store
         // as the load above, so load-modify-save lands in one record.
         async saveRegistry(workspaceKey, state) {
-          await saveRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey), state)
+          await saveRegistry(openStore(workspaceKey), state)
         },
         // Graph assembly reads whole logs: live store first, persistence
         // inspect as the cold fallback — the same order makePorts.readSession
@@ -613,8 +640,7 @@ export async function apply(ctx: Context): Promise<void> {
               getOrResumeDeps(ctx), sessionId as Session['id'],
             ) as Promise<SquashChildAgent>
           },
-          openStore: (workspaceKey) =>
-            createDomainStore(domain as unknown as DomainLike, workspaceKey),
+          openStore,
           compact: (agent, signal, request) =>
             compactNow({ meter: ctx.tokenMeter, llm: ctx.llm }, agent, signal, request),
           resolveTargetAgent: (sessionId) =>
@@ -682,7 +708,7 @@ export async function apply(ctx: Context): Promise<void> {
     const toolPorts: BranchToolPorts = {
       command: commandDeps,
       async branchSessionId(workspaceKey, name) {
-        const state = await loadRegistry(createDomainStore(domain as unknown as DomainLike, workspaceKey))
+        const state = await loadRegistry(openStore(workspaceKey))
         return state.branches[name]?.sessionId ?? null
       },
       // Live-first source resolution; cold sources resume through the
@@ -708,6 +734,17 @@ export async function apply(ctx: Context): Promise<void> {
       name: BRANCH_VOCABULARY_SECTION,
       order: BRANCH_VOCABULARY_ORDER,
       text: BRANCH_VOCABULARY,
+    })
+
+    // The ambient identity line (issue #28 phase 2): which branch THIS
+    // session is on, re-resolved at every assembly from the identity cache
+    // (sync provider contract; refresh points in branch-identity.ts).
+    // Empty text contributes nothing — a branch-less session (subagent,
+    // un-adopted conversation) simply gets no line.
+    yield ctx.systemPrompt.section({
+      name: BRANCH_IDENTITY_SECTION,
+      order: BRANCH_IDENTITY_ORDER,
+      text: branchIdentityProvider(identity),
     })
 
     yield async () => { await Promise.allSettled(active) }
