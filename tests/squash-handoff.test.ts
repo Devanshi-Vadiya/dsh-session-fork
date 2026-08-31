@@ -123,10 +123,16 @@ function fakeParentAgent(): Agent & { injected: UserMessage[] } {
  * The fake handoff agent: a running source whose cancellation ends its turn
  * (phase flips to idle, exactly the observable consequence of the real
  * agent-loop convergence), plus spies on every handoff entry point.
+ * `sessions` overrides the session object: `running` replaces the
+ * dispatch-time surface (e.g. a tail inside an open step), `postCancel`
+ * models what the real kernel writes when the cancelled turn closes — the
+ * official `turn/end` settles the open step, so the surface becomes
+ * pairable for the deferred executor.
  */
 function fakeHandoffAgent(
   phaseKind: 'running' | 'idle',
   pending: { nextStep?: number; nextTurn?: number } = {},
+  sessions: { running?: Session; postCancel?: Session } = {},
 ): SquashHandoffAgent & {
   cancels: Array<{ cause: unknown; options: unknown }>
   followups: UserMessage[]
@@ -135,10 +141,11 @@ function fakeHandoffAgent(
   const cancels: Array<{ cause: unknown; options: unknown }> = []
   const followups: UserMessage[] = []
   let phase = phaseKind
+  let session = sessions.running ?? childFixture()
   const nextStep = Array.from({ length: pending.nextStep ?? 0 })
   const nextTurn = Array.from({ length: pending.nextTurn ?? 0 })
   return {
-    session: childFixture(),
+    get session() { return session },
     get phase() { return { kind: phase } },
     inbox: {
       get hasPending() { return nextStep.length > 0 || nextTurn.length > 0 },
@@ -148,6 +155,7 @@ function fakeHandoffAgent(
     cancel(cause: unknown, options?: unknown) {
       cancels.push({ cause, options })
       phase = 'idle'
+      if (sessions.postCancel !== undefined) session = sessions.postCancel
     },
     whenIdle() {
       this.idleWaits += 1
@@ -259,6 +267,51 @@ describe('dispatchSquash (running source)', () => {
     const text = (report.content[0] as { type: 'text'; text: string }).text
     expect(text).toContain(`into branch 'main' as one checkpoint`)
     expect(text).toContain(`automated report`)
+  })
+
+  test('initiates despite a dispatch-time open final step — balance is re-validated after the cancellation (go-ce-v3 regression)', async () => {
+    // The running source's own squash_into call keeps the surface's final
+    // step open: the dispatch-time region end is STRUCTURALLY unbalanced
+    // ("region end … the step is still open" — exactly the go-ce-v3
+    // refusal on fix/workflow-finalize-advance, seq 47935). The precheck
+    // must let it through; the executor re-validates on the
+    // post-cancellation idle surface, where the cancelled turn's official
+    // turn/end has closed the step.
+    const running = fakeSession(
+      { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+        { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call' }] } } },
+        { type: 'user/message' },
+      ],
+      [0, 2, 3],
+    )
+    const postCancel = fakeSession(
+      { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+        { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call' }] } } },
+        { type: 'tool/result' },
+        { type: 'user/message', data: { message: checkpointUserMessage('compaction-1', 'summary body') } },
+      ],
+      [0, 2, 3, 4],
+    )
+    const agent = fakeHandoffAgent('running', {}, { running, postCancel })
+    const { deps, compactCalls, parentAgent } = makeDeps(agent)
+    const cap = captureRun()
+    const result = await dispatchSquash('main', deps, cap.run)
+    // Not the old refusal — the handoff is initiated.
+    expect(result.kind).toBe('success')
+    expect(result.kind === 'success' && result.text).toContain('initiated')
+    await cap.settled()
+    // The executor ran against the post-cancellation surface and completed.
+    expect(compactCalls.length).toBe(1)
+    expect(parentAgent.injected.length).toBe(1)
+    expect(agent.followups.length).toBe(1)
+    const text = (agent.followups[0]!.content[0] as { type: 'text'; text: string }).text
+    expect(text).toContain(`into branch 'main' as one checkpoint`)
   })
 
   test('reports a failed deferred squash by follow-up with the retry hint', async () => {

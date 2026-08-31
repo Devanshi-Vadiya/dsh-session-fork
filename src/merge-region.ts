@@ -39,6 +39,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { postForkRange, SquashCoreError } from './squash.js'
+import type { PostForkRangeOptions } from './squash.js'
 import type { RegistryState } from './types.js'
 
 /** How the target relates to the source's lineage for one merge region. */
@@ -80,6 +81,19 @@ export interface MergeRegionError {
 
 /** The result of one merge-region computation. */
 export type MergeRegionResult = MergeRegion | MergeRegionError
+
+/** Options for {@link mergeRegion}. */
+export interface MergeRegionOptions {
+  /**
+   * Skip the time-sensitive boundary-pairing gates (default: enforced) —
+   * see {@link PostForkRangeOptions.balance}: a running source's own
+   * dispatching call keeps the surface's final step open, so its region can
+   * never balance at dispatch time. The mid-turn squash handoff computes
+   * its region unchecked and re-validates at execution, once the cancelled
+   * turn has closed the step.
+   */
+  readonly balance?: boolean
+}
 
 /** One fork edge on a walked ancestry: `sessionId` forked from `parentSessionId` at `atSeq`. */
 interface AncestryStep {
@@ -132,10 +146,12 @@ export function mergeRegion(
   state: RegistryState,
   sourceSession: Session,
   targetSessionId: string,
+  options?: MergeRegionOptions,
 ): MergeRegionResult {
   if (targetSessionId === sourceSession.id) {
     throw new Error('merge-region: target and source are the same session')
   }
+  const balance = options?.balance
   const source = ancestry(state, sourceSession.id)
   const target = ancestry(state, targetSessionId)
 
@@ -147,7 +163,7 @@ export function mergeRegion(
     if (leaving === undefined) {
       throw new Error('merge-region: ancestry walk reached an inconsistent registry state')
     }
-    return regionSince(sourceSession, leaving.atSeq, 'source-ancestor', sourceSession.id)
+    return regionSince(sourceSession, leaving.atSeq, 'source-ancestor', sourceSession.id, balance)
   }
 
   // Case: a shared ancestor on the source's chain (possibly the target).
@@ -157,16 +173,16 @@ export function mergeRegion(
     if (lca === targetSessionId) {
       if (source.steps[0] === leaving) {
         // Direct parent: the seed boundary is authoritative (old logic).
-        return regionFromPostFork(sourceSession, 'direct-parent', targetSessionId)
+        return regionFromPostFork(sourceSession, 'direct-parent', targetSessionId, balance)
       }
-      return regionSince(sourceSession, leaving.atSeq, 'ancestor', targetSessionId)
+      return regionSince(sourceSession, leaving.atSeq, 'ancestor', targetSessionId, balance)
     }
-    return regionSince(sourceSession, leaving.atSeq, 'relative', lca)
+    return regionSince(sourceSession, leaving.atSeq, 'relative', lca, balance)
   }
 
   // No shared ancestry (or the registry walk truncated before one): the
   // whole conversation transfers.
-  return wholeRegion(sourceSession)
+  return wholeRegion(sourceSession, balance)
 }
 
 /** Seed-boundary region via the squash authority (direct-parent case). */
@@ -174,9 +190,13 @@ function regionFromPostFork(
   session: Session,
   relation: MergeRelation,
   lcaSessionId: string,
+  balance?: boolean,
 ): MergeRegionResult {
   try {
-    const { start, end } = postForkRange(session)
+    const { start, end } = postForkRange(
+      session,
+      balance === false ? { balance: false } satisfies PostForkRangeOptions : undefined,
+    )
     return { kind: 'ok', start, end, relation, lcaSessionId }
   } catch (error) {
     if (error instanceof SquashCoreError) {
@@ -202,22 +222,28 @@ function regionSince(
   boundarySeq: number,
   relation: MergeRelation,
   lcaSessionId: string,
+  balance?: boolean,
 ): MergeRegionResult {
   const nodes = session.surface.nodes.filter(seq => seq > boundarySeq)
-  return settleRegion(session, nodes, relation, lcaSessionId)
+  return settleRegion(session, nodes, relation, lcaSessionId, balance)
 }
 
 /** The whole conversation as the region (no shared ancestry). */
-function wholeRegion(session: Session): MergeRegionResult {
-  return settleRegion(session, [...session.surface.nodes], 'unrelated', undefined)
+function wholeRegion(session: Session, balance?: boolean): MergeRegionResult {
+  return settleRegion(session, [...session.surface.nodes], 'unrelated', undefined, balance)
 }
 
-/** Apply the empty and balance gates to one candidate node list. */
+/**
+ * Apply the empty gate (always — a region that is empty now stays empty
+ * after the handoff) and the balance gates (time-sensitive, skipped for the
+ * mid-turn dispatch — see {@link MergeRegionOptions.balance}).
+ */
 function settleRegion(
   session: Session,
   nodes: readonly number[],
   relation: MergeRelation,
   lcaSessionId: string | undefined,
+  balance?: boolean,
 ): MergeRegionResult {
   const start = nodes[0]
   const end = nodes.at(-1)
@@ -228,14 +254,14 @@ function settleRegion(
       message: 'merge-region: the source has no conversation in the transfer region',
     }
   }
-  if (!toolPairingBalancedBefore(session, start)) {
+  if (balance !== false && !toolPairingBalancedBefore(session, start)) {
     return {
       kind: 'error',
       code: 'unbalanced-range',
       message: `merge-region: region start seq ${start} is not a balanced boundary (would split a step's tool-call/result pair)`,
     }
   }
-  if (!toolPairingBalancedAfter(session, end)) {
+  if (balance !== false && !toolPairingBalancedAfter(session, end)) {
     return {
       kind: 'error',
       code: 'unbalanced-range',
