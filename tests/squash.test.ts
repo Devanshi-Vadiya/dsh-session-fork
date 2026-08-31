@@ -151,6 +151,23 @@ describe('postForkRange', () => {
     expect(codeOf(() => postForkRange(session))).toBe('unbalanced-range')
   })
 
+  test('balance: false returns the unbalanced region for the mid-turn dispatch', () => {
+    // Same shape as the test above — the running source's own initiating
+    // call keeps the step open — but the mid-turn dispatch computes its
+    // region WITHOUT the time-sensitive pairing gates: the executor
+    // re-validates on the post-cancellation idle surface.
+    const session = fakeSession(
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },
+        { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call' }] } } },
+        { type: 'user/message' },
+      ],
+      [0, 2, 3],
+    )
+    expect(postForkRange(session, { balance: false })).toEqual({ start: 2, end: 3 })
+  })
+
   test('balanced tool pairs inside the region pass both edge checks', () => {
     // The tool-call at seq 2 closes at seq 3, fully inside the region.
     const session = fakeSession(

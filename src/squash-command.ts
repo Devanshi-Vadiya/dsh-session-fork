@@ -113,6 +113,12 @@ export async function executeSquashAction(
  * The failing shape carries the user-facing `text`; the ok shape carries
  * the resolved target session id, the source branch's registry name, and
  * the decided merge region.
+ *
+ * `options.balance: false` skips the region's boundary-pairing gates:
+ * they are time-sensitive (a running source's own dispatching call keeps
+ * the surface's final step open), so the mid-turn dispatch cannot judge
+ * execution-time balance — the executor re-validates on the
+ * post-cancellation idle surface.
  */
 export type SquashPrecheck =
   | { readonly ok: false; readonly text: string }
@@ -128,6 +134,7 @@ export function precheckSquash(
   state: RegistryState,
   childSession: Session,
   target: string,
+  options?: { readonly balance?: boolean },
 ): SquashPrecheck {
   let targetSessionId: string
   try {
@@ -153,7 +160,7 @@ export function precheckSquash(
     }
   }
 
-  const region = mergeRegion(state, childSession, targetSessionId)
+  const region = mergeRegion(state, childSession, targetSessionId, options)
   if (region.kind === 'error') {
     return { ok: false, text: region.message.replace(/^(?:squash|merge-region):/, 'squash:') }
   }

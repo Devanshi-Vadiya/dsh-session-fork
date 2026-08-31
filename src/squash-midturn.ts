@@ -25,8 +25,15 @@
  *   automatically at the running turn's next step boundary, so the refusal
  *   self-heals — read the mail, then squash again. Next-turn items
  *   legitimately wait for a turn boundary; the refusal text says so.
- * - **Precheck before the cancellation** (`precheckSquash`): a bad target,
- *   self-squash, or an empty region must never cost the source its turn.
+ * - **Precheck before the cancellation** (`precheckSquash`, `balance:
+ *   false`): a bad target, self-squash, an unregistered source, or an
+ *   empty region must never cost the source its turn. The
+ *   boundary-pairing gates are deliberately NOT part of it — they are
+ *   time-sensitive (the initiating call itself keeps the surface's final
+ *   step open; go-ce-v3: `squash_into` on a running self was refused with
+ *   "region end … the step is still open" and this handoff was
+ *   unreachable). The executor re-validates on the post-cancellation
+ *   idle surface, where the cancelled turn's `turn/end` closes the step.
  *
  * Pure over injected seams, mirroring the repo's cordis-free discipline:
  * the host shell in index.ts/rpc.ts wires `run` to its in-flight
@@ -196,9 +203,21 @@ export async function dispatchSquash(
   }
   // Precheck BEFORE the cancellation: everything decidable without
   // compaction (target existence, self-squash, registration, region) must
-  // not cost the running turn.
+  // not cost the running turn. The boundary-pairing gates are deliberately
+  // absent here (`balance: false`): they are time-sensitive — the
+  // initiating call itself keeps the surface's final step open, so a
+  // running source can never balance at dispatch time (go-ce-v3: the
+  // squash_into tool was refused with "region end … the step is still
+  // open" and the handoff below was unreachable). The executor
+  // re-validates the region on the post-cancellation idle surface, where
+  // the cancelled turn's official turn/end closes the step.
   const state = await loadRegistry(deps.store)
-  const precheck = precheckSquash(state, deps.childAgent.session as Session, target)
+  const precheck = precheckSquash(
+    state,
+    deps.childAgent.session as Session,
+    target,
+    { balance: false },
+  )
   if (!precheck.ok) {
     return { kind: 'error', text: precheck.text }
   }

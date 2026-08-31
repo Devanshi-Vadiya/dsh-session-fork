@@ -54,6 +54,22 @@ export interface PostForkRange {
   readonly end: number
 }
 
+/** Options for {@link postForkRange}. */
+export interface PostForkRangeOptions {
+  /**
+   * Skip the boundary-pairing gates (default: enforced). The gates are
+   * TIME-SENSITIVE: while the source agent is running, its own surface tail
+   * sits inside the open step — the initiating squash call itself keeps
+   * the step open — so the region end can never balance at dispatch time
+   * (go-ce-v3 evidence: `squash_into` on a running self was refused with
+   * "region end … the step is still open" before the handoff could start).
+   * The mid-turn dispatch computes its region with `balance: false`; the
+   * executor re-validates on the post-cancellation idle surface, where the
+   * cancelled turn's official `turn/end` closes the step.
+   */
+  readonly balance?: boolean
+}
+
 /**
  * Select the child's post-fork region — the surface tail after the
  * session's fork construction boundary — and pre-validate both edges as
@@ -76,13 +92,17 @@ export interface PostForkRange {
  * seq coincide; only the JSONL storage projection coalesces chunk runs.)
  *
  * @param session - the child session being squashed.
+ * @param options - `balance: false` skips the time-sensitive pairing gates.
  * @returns the inclusive region by surface position.
  * @throws {@link SquashCoreError} `missing-seed-boundary` (root session —
  * no fork lineage — or no construction marker), `empty-fork-range`
  * (nothing after the boundary), or `unbalanced-range` (an edge would
  * split a tool-call/result pair).
  */
-export function postForkRange(session: Session): PostForkRange {
+export function postForkRange(
+  session: Session,
+  options?: PostForkRangeOptions,
+): PostForkRange {
   const lineage = session.header.seedLength
   if (lineage === undefined) {
     throw new SquashCoreError(
@@ -122,13 +142,13 @@ export function postForkRange(session: Session): PostForkRange {
       'squash: the child has no post-fork surface region to compact',
     )
   }
-  if (!toolPairingBalancedBefore(session, start)) {
+  if (options?.balance !== false && !toolPairingBalancedBefore(session, start)) {
     throw new SquashCoreError(
       'unbalanced-range',
       `squash: region start seq ${start} is not a balanced boundary (would split a step's tool-call/result pair)`,
     )
   }
-  if (!toolPairingBalancedAfter(session, end)) {
+  if (options?.balance !== false && !toolPairingBalancedAfter(session, end)) {
     throw new SquashCoreError(
       'unbalanced-range',
       `squash: region end seq ${end} is not a balanced boundary (would split a step, or the step is still open)`,
