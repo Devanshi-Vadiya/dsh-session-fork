@@ -277,6 +277,37 @@ describe('executeBranchAction', () => {
     if (result.kind === 'error') expect(result.text).toContain('ghost')
   })
 
+  test('list marks the invoking session\'s own branch (issue #42)', async () => {
+    const h = harness()
+    // s-parent (the harness's invoking session) adopts root `main`; `side`
+    // is a fork whose record points at its own child session.
+    await executeBranchAction(parseBranchAction('adopt main'), h.deps)
+    await executeBranchAction(parseBranchAction('side'), h.deps)
+    const result = await executeBranchAction(parseBranchAction('list'), h.deps)
+    expect(result.kind).toBe('success')
+    if (result.kind === 'success') {
+      const lines = result.text.split('\n')
+      const mainLine = lines.find(line => line.includes('main'))!
+      const sideLine = lines.find(line => line.includes('side'))!
+      expect(mainLine.startsWith('* ')).toBe(true)
+      expect(sideLine.startsWith('  ')).toBe(true)
+      // Exactly one marker row: the invoking session owns exactly `main`.
+      expect(lines.filter(line => line.startsWith('* '))).toHaveLength(1)
+    }
+  })
+
+  test('a session owning no branch lists every row unmarked (issue #42)', async () => {
+    const h = harness()
+    await executeBranchAction(parseBranchAction('a'), h.deps)
+    await executeBranchAction(parseBranchAction('b'), h.deps)
+    const result = await executeBranchAction(parseBranchAction('list'), h.deps)
+    expect(result.kind).toBe('success')
+    if (result.kind === 'success') {
+      expect(result.text).toContain('a')
+      expect(result.text).not.toContain('*')
+    }
+  })
+
   test('list marks dangling branches', async () => {
     const h = harness()
     // One live branch pointing at the parent, one pointing at s-gone.
@@ -300,6 +331,8 @@ describe('executeBranchAction', () => {
       expect(result.text).toContain('gone')
       expect(result.text).toContain('dangling')
       expect(result.text).not.toContain('live [dangling')
+      // s-parent owns none of these branches: no marker row (issue #42).
+      expect(result.text).not.toContain('*')
     }
   })
 

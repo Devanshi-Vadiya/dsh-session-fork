@@ -243,6 +243,19 @@ describe('branch_create / branch_adopt', () => {
     expect(h.renames).toEqual([{ sessionId: 's-parent', title: 'main' }])
   })
 
+  test('branch_list marks the caller\'s own branch (issue #42)', async () => {
+    const h = harness()
+    const defs = branchToolDefinitions(h.ports)
+    await toolBy(defs, 'branch_adopt').execute({ name: 'main' }, execOf(CALLER) as never)
+    await toolBy(defs, 'branch_create').execute({ name: 'side' }, execOf(CALLER) as never)
+    const value = await toolBy(defs, 'branch_list').execute({}, execOf(CALLER) as never)
+    // CALLER is s-parent — the session `main` was adopted onto — so exactly
+    // the main row carries the marker through the shared executor.
+    expect(value).toEqual({ ok: true, message: expect.stringContaining('* main') })
+    const message = (value as { message: string }).message
+    expect(message.split('\n').filter(line => line.startsWith('* '))).toHaveLength(1)
+  })
+
   test('create with a duplicate name surfaces the executor error text', async () => {
     const h = harness({ branches: { review: {
       name: 'review',
