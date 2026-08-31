@@ -127,15 +127,19 @@ export interface BranchCommandDeps {
   readonly archiveSession: (sessionId: string) => Promise<ArchiveOutcome>
 }
 
-/** Render one branch listing line. */
-function renderLine(listing: BranchListing): string {
+/**
+ * Render one branch listing line. `isCurrent` marks the invoking session's
+ * own row with git's `*` prefix (issue #42); every other row keeps the
+ * two-space indent so the columns stay aligned.
+ */
+function renderLine(listing: BranchListing, isCurrent: boolean): string {
   const { record } = listing
   const origin =
     record.forkOrigin === null
       ? 'root'
       : `← ${record.forkOrigin.parentSessionId}@${String(record.forkOrigin.atSeq)}`
   const flag = listing.dangling ? ' [dangling: session missing]' : ''
-  return `  ${record.name}  ${record.sessionId}  (${origin})${flag}`
+  return `${isCurrent ? '*' : ' '} ${record.name}  ${record.sessionId}  (${origin})${flag}`
 }
 
 /**
@@ -219,7 +223,17 @@ export async function executeBranchAction(
       if (listings.length === 0) {
         return { kind: 'success', text: 'No branches in this workspace yet. Create one with /branch <name>.' }
       }
-      return { kind: 'success', text: [`Branches:`, ...listings.map(renderLine)].join('\n') }
+      // The invoking session's own row carries the `*` marker (issue #42).
+      // A session that owns no registered branch (a subagent, an un-adopted
+      // conversation) marks nothing — every row stays plain, deterministically.
+      return {
+        kind: 'success',
+        text: [
+          'Branches:',
+          ...listings.map(listing =>
+            renderLine(listing, listing.record.sessionId === deps.currentSessionId)),
+        ].join('\n'),
+      }
     }
 
     case 'create': {
