@@ -18,6 +18,9 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-token-meter'
+// Same presence pattern for the prompt-assembly service the vocabulary
+// section registers into (`ctx.systemPrompt`, issue #28).
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { ArchiveOutcome, BranchPorts, SourceSessionView } from './branch.js'
 import { BranchArchiveError, BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction, createNamedBranch } from './command.js'
@@ -35,6 +38,11 @@ import type { SquashChildAgent } from './squash-command.js'
 import type { SquashHandoffDeps } from './squash-midturn.js'
 import { registerBranchTools } from './tools.js'
 import type { BranchToolPorts } from './tools.js'
+import {
+  BRANCH_VOCABULARY,
+  BRANCH_VOCABULARY_ORDER,
+  BRANCH_VOCABULARY_SECTION,
+} from './prompt.js'
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { compactNow } from './vendor/compact.js'
@@ -140,7 +148,8 @@ export const inject = [
   'llm',
   'sessionController',
   'connection',
-  'tools'
+  'tools',
+  'systemPrompt'
 ]
 
 /**
@@ -690,6 +699,16 @@ export async function apply(ctx: Context): Promise<void> {
       trackDetached,
     }
     yield registerBranchTools((tool) => ctx.tools.register(tool), toolPorts)
+
+    // The ambient branch worldview (issue #28): one static section in
+    // every prompt assembly of this host. Registered as an effect so the
+    // section disappears with the plugin fiber — same lifecycle contract
+    // as the tool surface above.
+    yield ctx.systemPrompt.section({
+      name: BRANCH_VOCABULARY_SECTION,
+      order: BRANCH_VOCABULARY_ORDER,
+      text: BRANCH_VOCABULARY,
+    })
 
     yield async () => { await Promise.allSettled(active) }
     yield async () => { await domain.close() }
