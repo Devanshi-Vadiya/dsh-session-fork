@@ -140,6 +140,7 @@ export const inject = [
   'llm',
   'sessionController',
   'connection',
+  'tools'
 ]
 
 /**
