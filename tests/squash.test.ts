@@ -34,8 +34,16 @@ interface FakeEvent {
  * `deriveEventMessage` serves `user/message` events from `data.message`;
  * tool-pairing balance is computed by the real
  * `toolPairingBalancedBefore/After` imports over these events.
+ *
+ * `seedLength` defaults to 0 (a forked child with an empty prefix — the
+ * first end-seed in the log is the construction marker, matching every
+ * single-marker fixture); pass `null` for a ROOT session (no fork lineage).
  */
-function fakeSession(rawEvents: readonly FakeEvent[], surfaceSeqs: readonly number[]): Session {
+function fakeSession(
+  rawEvents: readonly FakeEvent[],
+  surfaceSeqs: readonly number[],
+  seedLength?: number | null,
+): Session {
   const events = rawEvents.map((raw, seq) => ({ seq, ...raw })) as unknown as SessionEvent[]
   const deriveEventMessage = (event: SessionEvent): Message | null => {
     if (event.type !== 'user/message') return null
@@ -46,6 +54,7 @@ function fakeSession(rawEvents: readonly FakeEvent[], surfaceSeqs: readonly numb
     events,
     surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
     deriveEventMessage,
+    ...(seedLength === null ? { header: {} } : { header: { seedLength: seedLength ?? 0 } }),
   } as unknown as Session
 }
 
@@ -153,6 +162,77 @@ describe('postForkRange', () => {
         { type: 'user/message' },
       ],
       [0, 2, 3, 4],
+    )
+    expect(postForkRange(session)).toEqual({ start: 2, end: 4 })
+  })
+
+  test('a mid-history cold-resume marker does not truncate the region', () => {
+    // Construction marker at 1; the branch went cold and was resumed at 4.
+    // The region must still span the child's whole post-fork surface, not
+    // just the post-resume tail.
+    const session = fakeSession(
+      [
+        { type: 'user/message' },        // 0: inherited
+        { type: 'session/end-seed' },    // 1: construction
+        { type: 'user/message' },        // 2: own work
+        { type: 'user/message' },        // 3: own work
+        { type: 'session/end-seed' },    // 4: cold-resume marker
+        { type: 'user/message' },        // 5: own work after resume
+      ],
+      [0, 2, 3, 5],
+      1,
+    )
+    expect(postForkRange(session)).toEqual({ start: 2, end: 5 })
+  })
+
+  test('squashing a cold branch finds the region before its own resume marker', () => {
+    // The real-world shape (go-ce-v3 feat/rm): inherited markers below the
+    // lineage, the construction marker at it, and a resume marker written
+    // moments before /squash itself ran on the cold branch — nothing but
+    // the command follows it. A tail scan reports empty-fork-range.
+    const session = fakeSession(
+      [
+        { type: 'user/message' },        // 0: inherited
+        { type: 'session/end-seed' },    // 1: inherited (parent's history)
+        { type: 'user/message' },        // 2: inherited
+        { type: 'user/message' },        // 3: inherited
+        { type: 'session/end-seed' },    // 4: construction
+        { type: 'user/message' },        // 5: own work
+        { type: 'user/message' },        // 6: own work
+        { type: 'session/end-seed' },    // 7: resume before the command
+      ],
+      [0, 2, 3, 5, 6],
+      4,
+    )
+    expect(postForkRange(session)).toEqual({ start: 5, end: 6 })
+  })
+
+  test('a root session fails with missing-seed-boundary even with resume markers', () => {
+    const session = fakeSession(
+      [
+        { type: 'user/message' },
+        { type: 'session/end-seed' },    // the root's own resume marker
+        { type: 'user/message' },
+      ],
+      [0, 2],
+      null,
+    )
+    expect(codeOf(() => postForkRange(session))).toBe('missing-seed-boundary')
+  })
+
+  test('an absorbed seed marker (seed slice already ends with one) anchors the boundary', () => {
+    // The constructor skips re-marking a seed that ends with an end-seed;
+    // that trailing marker is the boundary — a later resume must not win.
+    const session = fakeSession(
+      [
+        { type: 'user/message' },        // 0: inherited
+        { type: 'session/end-seed' },    // 1: the seed's trailing marker
+        { type: 'user/message' },        // 2: own work
+        { type: 'session/end-seed' },    // 3: later resume
+        { type: 'user/message' },        // 4: own work after resume
+      ],
+      [0, 2, 4],
+      2,
     )
     expect(postForkRange(session)).toEqual({ start: 2, end: 4 })
   })

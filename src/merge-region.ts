@@ -18,10 +18,14 @@
  *
  * Coordinate validity: every fork copies the parent's prefix verbatim with
  * preserved seq numbering, so an ancestor-side `atSeq` below a descendant's
- * seed boundary addresses the same event in the descendant's log. The
- * `session/end-seed` marker is authoritative only for the direct-parent
- * case (the seed slice may extend past the anchoring `turn/end`, so
- * `seedLength >= atSeq + 1` — the two coordinates are NOT interchangeable).
+ * seed boundary addresses the same event in the descendant's log. For the
+ * direct-parent case the boundary anchors on `header.seedLength` (the
+ * durable fork-lineage line), NOT on the last `session/end-seed` —
+ * upstream appends that marker on every seeded construction, cold resumes
+ * included, so the last one usually marks the resume that preceded the
+ * transfer command itself (see `postForkRange`). The seed slice may still
+ * extend past the anchoring `turn/end`, so `seedLength >= atSeq + 1` — the
+ * two coordinates are NOT interchangeable.
  *
  * Pure and cordis-free; the same tool-pairing balance gates as squash guard
  * every computed boundary. squash, rebased-into, and merge all consume this one

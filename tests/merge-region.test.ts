@@ -21,12 +21,14 @@ function fakeSession(
   id: string,
   rawEvents: readonly FakeEvent[],
   surfaceSeqs: readonly number[],
+  seedLength = 0,
 ): Session {
   const events = rawEvents.map((raw, seq) => ({ seq, ...raw })) as unknown as SessionEvent[]
   return {
     id,
     events,
     surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
+    header: { seedLength },
   } as unknown as Session
 }
 
@@ -59,7 +61,7 @@ describe('mergeRegion: LCA cases', () => {
       { type: 'session/end-seed' },    // 1: seed boundary
       { type: 'user/message' },        // 2: review's own
       { type: 'user/message' },        // 3: review's own
-    ], [0, 2, 3])
+    ], [0, 2, 3], 1)
     const region = mergeRegion(state, source, 's-a')
     expect(region).toMatchObject({ start: 2, end: 3, relation: 'direct-parent', lcaSessionId: 's-a' })
   })

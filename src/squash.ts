@@ -56,21 +56,55 @@ export interface PostForkRange {
 
 /**
  * Select the child's post-fork region — the surface tail after the
- * constructor seed boundary — and pre-validate both edges as balanced
- * tool-pairing boundaries.
+ * session's fork construction boundary — and pre-validate both edges as
+ * balanced tool-pairing boundaries.
+ *
+ * The boundary is NOT "the last `session/end-seed`": upstream appends that
+ * marker on EVERY seeded construction — fork AND cold resume (harness
+ * session/src/index.ts:543-546; "a cold session is resumed on first
+ * touch"). A tail scan lands on the resume marker the host writes moments
+ * before `/squash` itself runs on a cold branch, making the post-boundary
+ * surface empty (`empty-fork-range`), or — for a mid-history resume —
+ * silently truncating the region to the post-resume tail. The anchor is
+ * `header.seedLength`, the durable fork-lineage boundary: markers below it
+ * were inherited with the seed, and the construction marker is the first
+ * end-seed at/after it. One absorbed case exists: a seed slice that
+ * already ends with an end-seed is not re-marked, so the trailing marker
+ * at `events[seedLength - 1]` IS the boundary. (Index addressing is exact:
+ * the kernel log is contiguous — `append` assigns `seq: log.length` and
+ * the constructor rejects non-contiguous seeds — so array position and
+ * seq coincide; only the JSONL storage projection coalesces chunk runs.)
+ *
  * @param session - the child session being squashed.
  * @returns the inclusive region by surface position.
- * @throws {@link SquashCoreError} `missing-seed-boundary` (no
- * `session/end-seed` event), `empty-fork-range` (nothing after the seed), or
- * `unbalanced-range` (an edge would split a tool-call/result pair).
+ * @throws {@link SquashCoreError} `missing-seed-boundary` (root session —
+ * no fork lineage — or no construction marker), `empty-fork-range`
+ * (nothing after the boundary), or `unbalanced-range` (an edge would
+ * split a tool-call/result pair).
  */
 export function postForkRange(session: Session): PostForkRange {
+  const lineage = session.header.seedLength
+  if (lineage === undefined) {
+    throw new SquashCoreError(
+      'missing-seed-boundary',
+      'squash: the session has no seed boundary — only a forked child can be squashed',
+    )
+  }
+  // The absorbed trailing seed marker: the constructor found the seed
+  // already ending with one and skipped re-marking, so no construction
+  // marker exists — any later end-seed is a cold-resume marker of this
+  // session and must not win over the seed's own trailing edge.
+  const absorbed = session.events[lineage - 1]
   let endSeed: number | undefined
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index]!
-    if (event.type === 'session/end-seed') {
-      endSeed = event.seq
-      break
+  if (absorbed !== undefined && absorbed.type === 'session/end-seed') {
+    endSeed = absorbed.seq
+  } else {
+    for (let index = lineage; index < session.events.length; index += 1) {
+      const event = session.events[index]!
+      if (event.type === 'session/end-seed') {
+        endSeed = event.seq
+        break
+      }
     }
   }
   if (endSeed === undefined) {
