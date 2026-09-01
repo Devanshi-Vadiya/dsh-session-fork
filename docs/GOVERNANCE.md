@@ -26,7 +26,7 @@ Stated or not, every rule in this file serves three ideas:
 
 - One session branch ⇔ one same-named git branch ⇔ one same-named worktree under the container directory (`/` → `-`).
 - The root branch always remains the developer's secretary: any activity that could pollute its context (writing code, deep research) is handed to a freshly forked branch.
-- A sub branch that hits a side quest — loosely related to the current task, yet large enough to block it (e.g. mid-feat you discover a fix must land first, or later code reuse or style suffers) — forks a new sub branch based on itself.
+- A sub branch that hits a side quest — loosely related to the current task, yet large enough to block it (e.g. mid-feat you discover a fix must land first, or later code reuse or style suffers) — forks a new child branch off itself.
 
 ## Permissions
 
@@ -36,13 +36,17 @@ Stated or not, every rule in this file serves three ideas:
 ## Creation
 
 - When a fork happens, the sub branch proactively checks that the worktree exists, creates it if missing, and updates the `.code-workspace` file so the new worktree joins the VS Code workspace.
+- Scenarios that would otherwise call for dsh's native sub agents can always be migrated to child branches with confidence.
 
 ## Merge and closing
 
-- A PR is opened only when the user asks; before opening it, rebase the sub branch onto the root branch. The PR merge itself must be performed manually by the user.
-- When its work is done, a child branch proactively runs the session-level squash (`squash_into` <parent_branch>); git-level branch operations are performed by the parent branch.
-- When the developer confirms closing: the child branch cleans up its own worktree and git branch, and removes the matching worktree entry from the `.code-workspace` file; the parent branch recycles (rm) the child's session branch.
+- When its work is done, a child branch proactively runs the session-level squash (`squash_into` <parent_branch>); if nothing meaningful can be compacted, it falls back to `rebase`. Once the squash has landed, it messages the parent branch to take over the cross-branch operation; git-level branch operations are performed by the parent branch.
+- When the developer confirms closing: the child branch cleans up its own worktree and local git branch, and removes the matching worktree entry from the `.code-workspace` file; the parent branch recycles (rm) the child's session branch.
 
-## Collaboration cadence
+## Messaging and communication
 
-- Discuss before acting: the user takes a few turns to settle the plan; read-only experiments are fine during discussion, but no file changes.
+The message tool is recommended for these scenarios:
+
+1. Child-branch work delivery: right after the squash, ask the parent branch to handle the cross-branch operation.
+2. A sub branch creating a child branch for a side quest states the requirement in the fewest words possible. (Remember: a child branch inherits your context **in full** — whatever you know, it knows; no context needs to be restated.)
+3. A child branch created by a sub branch: when a parent-branch decision is needed, squash itself first, then ask in the fewest words; when a user decision is needed, message the parent branch to alert the user instead of squashing, and let the user handle it directly on the child branch.

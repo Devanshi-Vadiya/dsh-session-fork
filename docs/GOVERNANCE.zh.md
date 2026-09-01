@@ -27,7 +27,7 @@
 
 - 一个 session branch ⇔ 一个同名 git branch ⇔ 容器目录下同名 worktree（`/` → `-`）。
 - root branch 应始终保持开发者的秘书的身份，任何可能污染上下文的行为（如写代码、深度调研），都应主动 fork 新 branch，交由它处理。
-- 当 sub branch 遇到支线开发任务（与当前任务相关性不高，任务却足够大，并且对当前任务有阻塞作用，比方说，写 feat 时发现必须先进行 fix，否则会影响后续的代码复用或风格）也应当开启新的基于自己的 sub branch。
+- 当 sub branch 遇到支线开发任务，与当前任务相关性不高，任务却足够大，并且对当前任务有阻塞作用（比方说，写 feat 时发现必须先进行 fix，否则会影响后续的代码复用或风格）也应当开启新的基于自己的 child branch。
 
 ## 权限
 
@@ -37,13 +37,17 @@
 ## 创建
 
 - fork 发生时，应由 sub branch 主动检查 worktree 是否存在，缺失即创建，同时补写 `.code-workspace` 文件，将新创建的 worktree 加入 vscode 的 workspace。
+- 总是可以放心地将需要 dsh 原生 sub agent 的场景迁移到使用 child branch。
 
 ## 合并与收尾
 
-- PR 仅在用户主动要求时提出；提出前先将 sub branch rebase 到 root branch，PR 的 merge 操作必须由用户手动完成。
-- 工作完成后，child branch 分支主动执行 session 层 squash（`squash_into` <parent_branch>）；git 层 branch 操作应由 parent branch 执行。
-- 当开发者确认进行收尾工作时，child branch 负责自己的 worktree 和 git branch 清理，同时清理 `.code-workspace` 文件对应的 worktree；parent branch 负责对 child branch 的 session branch 进行回收（rm）。
+- 工作完成后，child branch 分支主动执行 session 层 squash（`squash_into` <parent_branch>）,如果因为无法 compact 出有效信息，可以改用 rebase，确认 squash 到位后，通过 message 要求 parent branch 处理交付；git 层 branch 操作应由 parent branch 执行。
+- 当开发者确认进行收尾工作时，child branch 负责自己的 worktree 和本地 git branch 清理，同时清理 `.code-workspace` 文件对应的 worktree；parent branch 负责对 child branch 的 session branch 进行回收（rm）。
 
-## 协作节奏
+## 消息与沟通
 
-- 行动之前先讨论：用户会用若干 turn 明确行动方案；期间可做只读实验，但不改文件。
+message 工具推荐用于以下场景：
+
+1. child branch 工作交付，紧接着 squash 操作，要求 parent banch 处理分之间操作。
+2. 由 sub branch 创建的 child branch，用于处理支线任务时，用最简短的语言描述需求。（牢记 child branch 会**完全**继承你的上下文，你知道的 child branch 也能知道，不需要交代任何 context）
+3. 被 sub branch 创建出的 child branch，遇到需要 parent branch 决策时，先 squash 自己，然后用最简短的语言提问；遇到需要用户决策时，建议直接 message 给 parent branch 提醒用户，不需要 squash，让用户直接在 child branch 上处理。
