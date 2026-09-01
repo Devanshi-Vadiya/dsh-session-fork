@@ -137,6 +137,24 @@ describe('buildBranchEnvelope', () => {
     expect(text(buildBranchEnvelope(rebasedInto, 'x'))).toContain('The transcript below happened on')
   })
 
+  test('a message envelope marks the payload as peer input, not background (issue #47)', () => {
+    const messageFacts: BranchEventFacts = {
+      kind: 'message',
+      from: 'feat/review',
+      to: 'main',
+      fromSessionId: 'sess-review',
+    }
+    const message = buildBranchEnvelope(messageFacts, 'please handle the checkpoint')
+    const t = text(message)
+    expect(t).toContain('This is a message from branch "feat/review" into branch "main"')
+    expect(t).toContain('The message below happened on')
+    expect(t).toContain('<branch-message>')
+    expect(t.endsWith('</branch-message>')).toBe(true)
+    expect(t).toContain('act on it or reply as appropriate')
+    expect(t).not.toContain('Treat it as established background')
+    expect((message.source as { form: string }).form).toBe('notice')
+  })
+
   test('pages a long rebased-into transcript with stable coordinates in tags and summary', () => {
     const message = buildBranchEnvelope(squashFacts, 'page body', { index: 2, total: 3 })
     const t = text(message)

@@ -33,6 +33,8 @@ import type { DetachedRunner } from './squash-midturn.js'
 import type { SquashChildAgent } from './squash-command.js'
 import { executeRebasedIntoAction } from './rebased-into-command.js'
 import type { RebasedIntoAgent, RebasedIntoCommandDeps } from './rebased-into-command.js'
+import { executeSendMessage } from './send-message.js'
+import type { MessageTargetAgent, SendMessageDeps } from './send-message.js'
 
 /**
  * The host capabilities the tool surface needs, injected by src/index.ts.
@@ -67,6 +69,11 @@ export interface BranchToolPorts {
    * `/rebased into` command handler builds.
    */
   rebasedBase(workspaceKey: string): Omit<RebasedIntoCommandDeps, 'sourceAgent'>
+  /**
+   * Send-message executor deps minus the source session — the exact shape
+   * the `send_message` tool handler builds (issue #47).
+   */
+  sendBase(workspaceKey: string): Omit<SendMessageDeps, 'sourceSession'>
   /** The host's detached-continuation tracker (plugin dispose drains it). */
   readonly trackDetached: DetachedRunner
 }
@@ -375,6 +382,40 @@ export function transferToolDefinitions(ports: BranchToolPorts): ToolDefinition[
 }
 
 /**
+ * The messaging tool (issue #47): send a short message to another
+ * registered branch by name. The sender is the calling agent's own branch;
+ * any registered branch may address any other (registry-named addressing,
+ * not the subagent seam's parent-child authority).
+ */
+export function messageToolDefinitions(ports: BranchToolPorts): ToolDefinition[] {
+  const sendMessage = defineTool({
+    name: 'send_message',
+    description:
+      'Send a short text message to another registered branch by name (agent-to-agent; the foundation of parallel branch work). '
+      + BRANCH_IS
+      + 'The message rides a <branch-message> envelope and is delivered through steer(): a busy target reads it at its nearest step boundary, an idle target starts a turn for it — delivery always wakes the target. '
+      + 'One-way: the call confirms delivery only and never waits for a reply. '
+      + 'Fail-fast: an unknown branch name, empty text, or a self-send returns an error you can correct and retry in the same turn.',
+    parameters: {
+      branch: { type: 'string', required: true, description: 'The target branch\'s name (must be registered).' },
+      text: { type: 'string', required: true, description: 'The message body the target branch\'s agent will read.' },
+    },
+    output: jsonOutput(),
+    async execute(args, exec) {
+      const caller = callerOf(exec)
+      if ('ok' in caller) return caller
+      return commandResultToToolValue(
+        await executeSendMessage(args.branch, args.text, {
+          sourceSession: (exec.agent as Agent).session,
+          ...ports.sendBase(caller.workspaceKey),
+        }),
+      )
+    },
+  })
+  return [sendMessage]
+}
+
+/**
  * Register every branch tool on one register callback (host: the dsh tools
  * service). Returns the combined disposer for the plugin's effect chain.
  */
@@ -382,7 +423,11 @@ export function registerBranchTools(
   register: (tool: ToolDefinition) => () => unknown,
   ports: BranchToolPorts,
 ): () => void {
-  const disposers = [...branchToolDefinitions(ports), ...transferToolDefinitions(ports)]
+  const disposers = [
+    ...branchToolDefinitions(ports),
+    ...transferToolDefinitions(ports),
+    ...messageToolDefinitions(ports),
+  ]
     .map(tool => register(tool))
   return () => { for (const dispose of disposers) dispose() }
 }

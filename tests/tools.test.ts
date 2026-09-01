@@ -407,7 +407,7 @@ describe('transfer tools: squash_into / rebased_into', () => {
 })
 
 describe('registerBranchTools', () => {
-  test('registers all seven tools and disposes them together', () => {
+  test('registers all eight tools and disposes them together', () => {
     const h = harness()
     const registered: string[] = []
     const disposed: string[] = []
@@ -417,7 +417,7 @@ describe('registerBranchTools', () => {
     }, h.ports)
     expect(registered).toEqual([
       'branch_list', 'branch_create', 'branch_adopt', 'branch_rename', 'branch_remove',
-      'squash_into', 'rebased_into',
+      'squash_into', 'rebased_into', 'send_message',
     ])
     expect(disposed.length).toBe(0)
     dispose()

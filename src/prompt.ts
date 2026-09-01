@@ -44,20 +44,19 @@ export const BRANCH_VOCABULARY_ORDER = 2950
  */
 export const BRANCH_VOCABULARY = `# Branch vocabulary (dsh-session-fork)
 
-This workspace's conversations are organized as a branch DAG by the
-dsh-session-fork plugin; the branch tab renders it.
+This workspace's conversations form a branch DAG rendered by the branch tab.
 
-- A branch is a named, persistent fork of a conversation (a session).
-  The registry maps names to sessions; sessions are never deleted —
-  removing a branch archives it (data kept).
-- Fork seeds a new branch with this conversation's history up to the
-  last completed turn; the child's own work starts after the seed
-  boundary, and inherited history is not its own work.
-- squash_into compacts a branch's post-fork region into a summary and
-  delivers it to the target branch as a merge checkpoint — established
-  background, not part of the target's own conversation.
-- rebased_into delivers a branch's verbatim transcript to the target
-  branch the same way.
-- Branch notices (fork/adopt/rename, <branch-squash> envelopes) are
-  plugin-authored facts; treat them as established background.
+- A branch is a named, persistent fork of a conversation (a session); the
+  registry maps names to sessions. Sessions are never deleted — removing a
+  branch archives it (data kept).
+- Fork seeds a new branch with this conversation's history up to the last
+  completed turn; inherited history is not the child's own work.
+- squash_into compacts a branch's post-fork region into one summary
+  delivered to the target branch as a merge checkpoint.
+- rebased_into delivers a branch's verbatim transcript the same way.
+- send_message delivers a short message to another branch by name and
+  wakes it; a <branch-message> envelope is peer input, not background.
+- Transferred material (squash summaries, rebased_into transcripts) and
+  branch notices (fork/adopt/rename, <branch-squash> envelopes) are
+  established background, not the target's own conversation.
 `

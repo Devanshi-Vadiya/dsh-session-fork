@@ -31,6 +31,7 @@ import { createBranchRpcHandler, registerRpcChannel } from './rpc.js'
 import type { BranchRpcPorts, ConnectionRpcLike } from './rpc.js'
 import { executeRebasedIntoAction, parseRebasedIntoAction } from './rebased-into-command.js'
 import type { RebasedIntoAgent, RebasedIntoCommandDeps } from './rebased-into-command.js'
+import type { MessageTargetAgent, SendMessageDeps } from './send-message.js'
 import { executeSquashAction, parseSquashAction } from './squash-command.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { dispatchSquashAction } from './squash-midturn.js'
@@ -113,6 +114,7 @@ export {
   parseRebasedIntoAction,
 } from './rebased-into-command.js'
 export type { RebasedIntoAction, RebasedIntoCommandDeps } from './rebased-into-command.js'
+export type { MessageTargetAgent, SendMessageDeps } from './send-message.js'
 export { mergeRegion } from './merge-region.js'
 export type {
   MergeRegion,
@@ -540,6 +542,20 @@ export async function apply(ctx: Context): Promise<void> {
       flush: (agent) => ctx.sessions.flush(agent.session),
     })
 
+    // Shared send-message executor deps minus the source session
+    // (src/tools.ts BranchToolPorts.sendBase shape; issue #47). Target
+    // resolution is the same vendored ensureSession kernel as squash and
+    // rebased-into (resume, never create) — a cold target branch resumes,
+    // and the waking `steer` transport then starts its turn.
+    const sendBase = (
+      workspaceKey: string,
+    ): Omit<SendMessageDeps, 'sourceSession'> => ({
+      store: openStore(workspaceKey),
+      resolveTargetAgent: (sessionId) =>
+        getOrResumeAgent(getOrResumeDeps(ctx), sessionId as Session['id']) as Promise<MessageTargetAgent>,
+      flush: (agent) => ctx.sessions.flush(agent.session),
+    })
+
     yield ctx.commands.register({
       ...branchCommandDefinition,
       handler: (invocation: CommandInvocation): Promise<CommandResult> => {
@@ -722,6 +738,7 @@ export async function apply(ctx: Context): Promise<void> {
       },
       squashBase,
       rebasedBase,
+      sendBase,
       trackDetached,
     }
     yield registerBranchTools((tool) => ctx.tools.register(tool), toolPorts)
