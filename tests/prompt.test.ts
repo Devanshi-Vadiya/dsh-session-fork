@@ -3,13 +3,16 @@ import {
   BRANCH_VOCABULARY,
   BRANCH_VOCABULARY_ORDER,
   BRANCH_VOCABULARY_SECTION,
+  GOVERNANCE_ADVISORY,
+  GOVERNANCE_ADVISORY_ORDER,
+  GOVERNANCE_ADVISORY_SECTION,
 } from '../src/prompt.js'
 
 /**
- * The ambient vocabulary section (issue #28, phase 1). These tests pin
- * the load-bearing properties of a text that ships in EVERY prompt
- * assembly of every session: the vocabulary terms it must state, the
- * token budget it must respect, and the registration facts the host
+ * The ambient static sections (issue #28 phase 1; issue #48). These tests
+ * pin the load-bearing properties of texts that ship in EVERY prompt
+ * assembly of every session: the vocabulary terms they must state, the
+ * token budget they must respect, and the registration facts the host
  * wiring in src/index.ts relies on.
  */
 describe('branch vocabulary section', () => {
@@ -55,5 +58,38 @@ describe('branch vocabulary section', () => {
     // ~1000 characters: the section ships with every model request of
     // every session on the host, so the budget is part of the contract.
     expect(BRANCH_VOCABULARY.length).toBeLessThanOrEqual(1000)
+  })
+})
+
+describe('governance adoption section', () => {
+  test('the section name is plugin-prefixed (global registry collision guard)', () => {
+    expect(GOVERNANCE_ADVISORY_SECTION).toBe('dsh-session-fork:governance')
+  })
+
+  test('the order rides after the identity section, below TOOLS_SDK', () => {
+    // identity 2960 < ours < TOOLS_SDK 5000 — adoption advice reads once
+    // the reader knows what a branch is and which branch it is on.
+    expect(GOVERNANCE_ADVISORY_ORDER).toBeGreaterThan(2960)
+    expect(GOVERNANCE_ADVISORY_ORDER).toBeLessThan(5000)
+    expect(GOVERNANCE_ADVISORY_ORDER).toBe(2970)
+  })
+
+  test('states both adoption paths and their carriers', () => {
+    for (const term of ['GOVERNANCE.md', 'AGENTS.md', 'symlink', 'worktree']) {
+      expect(GOVERNANCE_ADVISORY).toContain(term)
+    }
+  })
+
+  test('carries the anti-nag contract (issue #48)', () => {
+    expect(GOVERNANCE_ADVISORY).toContain('at most once')
+    expect(GOVERNANCE_ADVISORY).toContain('refusal settles')
+  })
+
+  test('carries no template variables (static section)', () => {
+    expect(GOVERNANCE_ADVISORY).not.toMatch(/\{\{[a-z][a-z0-9_]*\}\}/)
+  })
+
+  test('stays within the every-assembly token budget', () => {
+    expect(GOVERNANCE_ADVISORY.length).toBeLessThanOrEqual(1000)
   })
 })

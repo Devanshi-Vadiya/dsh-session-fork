@@ -1,23 +1,21 @@
 /**
- * The ambient system-prompt contribution (issue #28): one vocabulary
- * section stating the branch worldview every session of a workspace with
- * this plugin operates under — what a branch is, what fork/squash_into/
- * rebased_into do to the conversation graph, and how to read the plugin's
- * own notices.
+ * The ambient system-prompt contributions — the static half (issue #28
+ * phase 1; issue #48): a vocabulary section stating the branch worldview
+ * every session of a workspace with this plugin operates under, and a
+ * governance-adoption section advising how to bring a workspace onto the
+ * shipped GOVERNANCE.md baseline. The per-session identity line (issue #28
+ * phase 2) lives in branch-identity.ts — it needs the registry.
  *
  * Design contract:
  *
- * - ONE static section, registered through `ctx.systemPrompt.section()`
- *   with a bare numeric order — the central `getSectionOrder()` names are
+ * - Each section registers through `ctx.systemPrompt.section()` with a
+ *   bare numeric order — the central `getSectionOrder()` names are
  *   harness-internal, so external plugins pick unallocated numbers
  *   (dsh-mnemon does the same for its memory-protocol block).
  * - The wording mirrors the tool descriptions' vocabulary (src/tools.ts)
  *   on purpose: the model must meet one set of terms everywhere. Tool
- *   parameter detail stays in the descriptions; this section carries only
- *   the worldview.
- * - Static text in this stage (issue #28 phase 1). Phase 2 — after the
- *   current-branch marker lands (issue #42) — may upgrade `text` to a
- *   per-assembly provider that also states the session's own branch.
+ *   parameter detail stays in the descriptions; these sections carry only
+ *   the worldview and the adoption advice.
  *
  * Pure constants, no cordis, no I/O — unit-testable with plain
  * assertions, mirroring the purity discipline of `branch-events.ts`.
@@ -59,4 +57,41 @@ This workspace's conversations form a branch DAG rendered by the branch tab.
 - Transferred material (squash summaries, rebased_into transcripts) and
   branch notices (fork/adopt/rename, <branch-squash> envelopes) are
   established background, not the target's own conversation.
+`
+
+/**
+ * Unique section name for the governance-adoption advisory. Plugin prefix,
+ * same global-registry collision guard as the vocabulary section.
+ */
+export const GOVERNANCE_ADVISORY_SECTION = 'dsh-session-fork:governance'
+
+/**
+ * Placement: after the identity section (2960) — adoption advice reads
+ * best once the session knows both what a branch is and which branch it
+ * is on. Bare number, same reason as the sections above.
+ */
+export const GOVERNANCE_ADVISORY_ORDER = 2970
+
+/**
+ * The advisory text (issue #48): how a workspace gets onto the shipped
+ * governance baseline — carried as the cwd's AGENTS.md so the instruction
+ * chain injects it, and run on the git-worktree model — plus the
+ * anti-nag contract once the user has declined. Kept under ~1000
+ * characters like the vocabulary: it ships in every assembly of every
+ * session, so every line must earn its tokens.
+ */
+export const GOVERNANCE_ADVISORY = `# Governance adoption (dsh-session-fork)
+
+This plugin ships a governance baseline — GOVERNANCE.md in its repository.
+It works best when the workspace carries it as an instruction file and runs
+branches on git worktrees.
+
+- If the working directory's instruction files do not derive from this
+  plugin's GOVERNANCE.md, recommend once that the user copy it into the
+  workspace and symlink it into the cwd as AGENTS.md, so the baseline loads
+  into every session.
+- If the workspace does not follow the GOVERNANCE.md model — one session
+  branch ⇔ one git branch ⇔ one same-named worktree — suggest adopting it.
+- Raise each suggestion at most once. An explicit refusal settles the
+  question for good: do not re-suggest, do not nag.
 `
