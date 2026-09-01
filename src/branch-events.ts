@@ -1,6 +1,6 @@
 /**
  * Branch event envelopes: the single, shared way every branch operation
- * (fork, squash, rebased-into, adopt, rename) renders an AI-visible
+ * (fork, squash, rebased-into, adopt, rename, message) renders an AI-visible
  * provenance message.
  *
  * Design contract (agreed 2026-08-22 before the enhance-fork / enhance-squash
@@ -36,7 +36,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 
 /** The branch operations that emit AI-visible provenance messages. */
-export type BranchEventKind = 'fork' | 'squash' | 'rebased-into' | 'adopt' | 'rename'
+export type BranchEventKind = 'fork' | 'squash' | 'rebased-into' | 'adopt' | 'rename' | 'message'
 
 /**
  * The facts a branch event states. Every field names durable truth at write
@@ -163,6 +163,7 @@ const MATERIAL_NOUN: Readonly<Record<BranchEventKind, string>> = {
   fork: 'notice',
   squash: 'summary',
   'rebased-into': 'transcript',
+  message: 'message',
   // adopt/rename are payload-less facts — they ride `buildBranchNotice`
   // and never reach the envelope path; the entries keep the Record total.
   adopt: 'notice',
@@ -170,13 +171,31 @@ const MATERIAL_NOUN: Readonly<Record<BranchEventKind, string>> = {
 }
 
 /**
+ * How each envelope kind tells the reader to treat the payload — the
+ * preamble's closing clause. Settled material (a summary, a transcript) is
+ * established background; a message is live peer input that may carry a
+ * request the target should act on (issue #47: task dispatch, handling
+ * requests), so it must not be filed away as background.
+ */
+const TREAT_AS: Readonly<Record<BranchEventKind, string>> = {
+  fork: 'Treat it as established background.',
+  squash: 'Treat it as established background.',
+  'rebased-into': 'Treat it as established background.',
+  adopt: 'Treat it as established background.',
+  rename: 'Treat it as established background.',
+  message: 'It may carry a request or information from that branch\'s agent — act on it or reply as appropriate.',
+}
+
+/**
  * Build a branch event envelope around a payload: an English preamble plus
  * an XML-style tag pair, mirroring the official compaction checkpoint. The
- * payload is material from ANOTHER branch: a squash summary, or one page of
- * a rebased-into transcript. The preamble states full provenance and marks the
- * material as background; the close tag keeps later grafted material from
- * blurring into the target's own history.
- * @param facts - the event facts; `kind` is 'squash' or 'rebased-into' (fork has no payload).
+ * payload is material from ANOTHER branch: a squash summary, one page of a
+ * rebased-into transcript, or a live message. The preamble states full
+ * provenance and marks the material per kind (settled material as
+ * background, a message as peer input); the close tag keeps later grafted
+ * material from blurring into the target's own history.
+ * @param facts - the event facts; `kind` is 'squash', 'rebased-into', or
+ *   'message' (fork has no payload).
  * @param payload - the verbatim payload text (summary or transcript page).
  * @param page - paging coordinates for multi-message rebased-into transcripts.
  * @param extraSource - caller-owned fields spread onto the source AFTER
@@ -196,7 +215,7 @@ export function buildBranchEnvelope(
   const preamble =
     `This is a ${facts.kind} from branch "${facts.from}"${originPart} into branch "${facts.to}". ` +
     `The ${MATERIAL_NOUN[facts.kind]} below happened on "${facts.from}" and was transferred by dsh-session-fork; ` +
-    `it is not part of this branch's own conversation. Treat it as established background.`
+    `it is not part of this branch's own conversation. ${TREAT_AS[facts.kind]}`
   const text =
     `${preamble}\n` +
     `<branch-${facts.kind}${pagePart}>\n` +
