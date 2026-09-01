@@ -43,6 +43,9 @@ import {
   BRANCH_VOCABULARY,
   BRANCH_VOCABULARY_ORDER,
   BRANCH_VOCABULARY_SECTION,
+  GOVERNANCE_ADVISORY,
+  GOVERNANCE_ADVISORY_ORDER,
+  GOVERNANCE_ADVISORY_SECTION,
 } from './prompt.js'
 import {
   BRANCH_IDENTITY_ORDER,
@@ -762,6 +765,16 @@ export async function apply(ctx: Context): Promise<void> {
       name: BRANCH_IDENTITY_SECTION,
       order: BRANCH_IDENTITY_ORDER,
       text: branchIdentityProvider(identity),
+    })
+
+    // The governance-adoption advisory (issue #48): the static nudge that
+    // brings a workspace onto the shipped GOVERNANCE.md baseline — copy +
+    // symlink as the cwd's AGENTS.md, git-worktree model — under an
+    // at-most-once, refusal-settles contract. Same lifecycle as above.
+    yield ctx.systemPrompt.section({
+      name: GOVERNANCE_ADVISORY_SECTION,
+      order: GOVERNANCE_ADVISORY_ORDER,
+      text: GOVERNANCE_ADVISORY,
     })
 
     yield async () => { await Promise.allSettled(active) }
