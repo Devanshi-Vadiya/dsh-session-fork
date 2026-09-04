@@ -52,8 +52,8 @@ This workspace's conversations form a branch DAG rendered by the branch tab.
 - squash_into compacts a branch's post-fork region into one summary
   delivered to the target branch as a merge checkpoint.
 - rebased_into delivers a branch's verbatim transcript the same way.
-- send_message delivers a short message to another branch by name and
-  wakes it; a <branch-message> envelope is peer input, not background.
+- send_message_by_branch delivers a short message to another branch by name
+  and wakes it; a <branch-message> envelope is peer input, not background.
 - Transferred material (squash summaries, rebased_into transcripts) and
   branch notices (fork/adopt/rename, <branch-squash> envelopes) are
   established background, not the target's own conversation.

@@ -41,13 +41,13 @@
 
 ## 合并与收尾
 
-- 工作完成后，child branch 分支主动执行 session 层 squash（`squash_into` <parent_branch>）,如果因为无法 compact 出有效信息，可以改用 rebase，确认 squash 到位后，通过 message 要求 parent branch 处理交付；git 层 branch 操作应由 parent branch 执行。
+- 工作完成后，child branch 分支主动执行 session 层 squash（`squash_into` <parent_branch>）,如果因为无法 compact 出有效信息，可以改用 rebase，确认 squash 到位后，通过 `send_message_by_branch` 要求 parent branch 处理交付；git 层 branch 操作应由 parent branch 执行。
 - 当开发者确认进行收尾工作时，child branch 负责自己的 worktree 和本地 git branch 清理，同时清理 `.code-workspace` 文件对应的 worktree；parent branch 负责对 child branch 的 session branch 进行回收（rm）。
 
 ## 消息与沟通
 
-message 工具推荐用于以下场景：
+`send_message_by_branch` 工具推荐用于以下场景：
 
 1. child branch 工作交付，紧接着 squash 操作，要求 parent banch 处理分之间操作。
 2. 由 sub branch 创建的 child branch，用于处理支线任务时，用最简短的语言描述需求。（牢记 child branch 会**完全**继承你的上下文，你知道的 child branch 也能知道，不需要交代任何 context）
-3. 被 sub branch 创建出的 child branch，遇到需要 parent branch 决策时，先 squash 自己，然后用最简短的语言提问；遇到需要用户决策时，建议直接 message 给 parent branch 提醒用户，不需要 squash，让用户直接在 child branch 上处理。
+3. 被 sub branch 创建出的 child branch，遇到需要 parent branch 决策时，先 squash 自己，然后用最简短的语言提问；遇到需要用户决策时，建议直接用 `send_message_by_branch` 发给 parent branch 提醒用户，不需要 squash，让用户直接在 child branch 上处理。

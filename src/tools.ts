@@ -71,7 +71,7 @@ export interface BranchToolPorts {
   rebasedBase(workspaceKey: string): Omit<RebasedIntoCommandDeps, 'sourceAgent'>
   /**
    * Send-message executor deps minus the source session — the exact shape
-   * the `send_message` tool handler builds (issue #47).
+   * the `send_message_by_branch` tool handler builds (issue #47).
    */
   sendBase(workspaceKey: string): Omit<SendMessageDeps, 'sourceSession'>
   /** The host's detached-continuation tracker (plugin dispose drains it). */
@@ -389,7 +389,7 @@ export function transferToolDefinitions(ports: BranchToolPorts): ToolDefinition[
  */
 export function messageToolDefinitions(ports: BranchToolPorts): ToolDefinition[] {
   const sendMessage = defineTool({
-    name: 'send_message',
+    name: 'send_message_by_branch',
     description:
       'Send a short text message to another registered branch by name (agent-to-agent; the foundation of parallel branch work). '
       + BRANCH_IS

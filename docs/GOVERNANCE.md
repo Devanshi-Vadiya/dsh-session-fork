@@ -45,7 +45,7 @@ Stated or not, every rule in this file serves three ideas:
 
 ## Messaging and communication
 
-The message tool is recommended for these scenarios:
+The `send_message_by_branch` tool is recommended for these scenarios:
 
 1. Child-branch work delivery: right after the squash, ask the parent branch to handle the cross-branch operation.
 2. A sub branch creating a child branch for a side quest states the requirement in the fewest words possible. (Remember: a child branch inherits your context **in full** — whatever you know, it knows; no context needs to be restated.)
