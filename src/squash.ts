@@ -21,7 +21,8 @@ import {
 import type { ManualCompactionErrorCode } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
+import { SessionSeq as sessionSeq } from '@deepseek-ai/dsh-session'
 import { buildBranchEnvelope } from './branch-events.js'
 
 /** Typed failure codes of the pure squash logic. */
@@ -49,9 +50,9 @@ export class SquashCoreError extends Error {
  */
 export interface PostForkRange {
   /** Inclusive first surface-node seq of the region. */
-  readonly start: number
+  readonly start: SessionSeq
   /** Inclusive last surface-node seq of the region. */
-  readonly end: number
+  readonly end: SessionSeq
 }
 
 /** Options for {@link postForkRange}. */
@@ -82,14 +83,16 @@ export interface PostForkRangeOptions {
  * before `/squash` itself runs on a cold branch, making the post-boundary
  * surface empty (`empty-fork-range`), or — for a mid-history resume —
  * silently truncating the region to the post-resume tail. The anchor is
- * `header.seedLength`, the durable fork-lineage boundary: markers below it
+ * `session.inheritedEventCount` (with `header.isSeeded` as the marker), the
+ * durable fork-lineage boundary: markers below it
  * were inherited with the seed, and the construction marker is the first
  * end-seed at/after it. One absorbed case exists: a seed slice that
  * already ends with an end-seed is not re-marked, so the trailing marker
- * at `events[seedLength - 1]` IS the boundary. (Index addressing is exact:
- * the kernel log is contiguous — `append` assigns `seq: log.length` and
- * the constructor rejects non-contiguous seeds — so array position and
- * seq coincide; only the JSONL storage projection coalesces chunk runs.)
+ * at `events[inheritedEventCount - 1]` IS the boundary. (Index addressing
+ * is exact: the kernel log is contiguous — `append` assigns `seq:
+ * log.length` and the constructor rejects non-contiguous seeds — so array
+ * position and seq coincide; only the JSONL storage projection coalesces
+ * chunk runs.)
  *
  * @param session - the child session being squashed.
  * @param options - `balance: false` skips the time-sensitive pairing gates.
@@ -103,8 +106,8 @@ export function postForkRange(
   session: Session,
   options?: PostForkRangeOptions,
 ): PostForkRange {
-  const lineage = session.header.seedLength
-  if (lineage === undefined) {
+  const lineage = session.inheritedEventCount
+  if (lineage === 0 && !session.header.isSeeded) {
     throw new SquashCoreError(
       'missing-seed-boundary',
       'squash: the session has no seed boundary — only a forked child can be squashed',
@@ -114,14 +117,14 @@ export function postForkRange(
   // already ending with one and skipped re-marking, so no construction
   // marker exists — any later end-seed is a cold-resume marker of this
   // session and must not win over the seed's own trailing edge.
-  const absorbed = session.events[lineage - 1]
+  const absorbed = lineage > 0 ? session.eventAt(sessionSeq(lineage - 1)) : undefined
   let endSeed: number | undefined
   if (absorbed !== undefined && absorbed.type === 'session/end-seed') {
     endSeed = absorbed.seq
   } else {
-    for (let index = lineage; index < session.events.length; index += 1) {
-      const event = session.events[index]!
-      if (event.type === 'session/end-seed') {
+    for (let index: number = lineage; index < session.seq; index += 1) {
+      const event = session.eventAt(sessionSeq(index))
+      if (event !== undefined && event.type === 'session/end-seed') {
         endSeed = event.seq
         break
       }
@@ -167,13 +170,12 @@ export function postForkRange(
  * carries no compaction checkpoint.
  */
 export function extractCheckpointMessage(session: Session): UserMessage {
-  const events = session.events
   // Scan from the surface tail: the squash compaction just landed one
   // checkpoint node, so the newest match is the right one — a stale
   // checkpoint in the inherited prefix must never win.
   for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
     const seq = session.surface.nodes[index]!
-    const event = events[seq]
+    const event = session.eventAt(seq)
     if (event === undefined || event.type !== 'user/message') continue
     const message = session.deriveEventMessage(event)
     if (message !== null && message.role === 'user' && isCompactCheckpointSource(message.source)) {
@@ -202,9 +204,9 @@ export interface MergeProvenance {
   /** The child (source) branch's session id. */
   readonly childSessionId: Session['id']
   /** The compacted region by surface position in the source log. */
-  readonly shadowedRange: { readonly start: number; readonly end: number }
+  readonly shadowedRange: { readonly start: SessionSeq; readonly end: SessionSeq }
   /** The shadowed surface-node seqs, in surface order. */
-  readonly shadowedSeqs: readonly number[]
+  readonly shadowedSeqs: readonly SessionSeq[]
   /**
    * The compacted region in TURN coordinates, for the model-facing envelope
    * preamble (`covering its turns A–B`). `shadowedRange` is surface-seq
@@ -232,8 +234,8 @@ export interface MergeCheckpointSource {
   readonly compactionId: CompactionId
   readonly sourceCommandId?: CommandId
   readonly childSessionId: Session['id']
-  readonly shadowedRange: { readonly start: number; readonly end: number }
-  readonly shadowedSeqs: readonly number[]
+  readonly shadowedRange: { readonly start: SessionSeq; readonly end: SessionSeq }
+  readonly shadowedSeqs: readonly SessionSeq[]
 }
 
 /**
@@ -260,12 +262,12 @@ export interface MergeBranchNames {
  */
 export function turnRangeOf(
   session: Session,
-  seqs: readonly number[],
+  seqs: readonly SessionSeq[],
 ): { readonly start: number; readonly end: number } | undefined {
   let start = Infinity
   let end = -Infinity
   for (const seq of seqs) {
-    const data = session.events[seq]?.data as { turn?: unknown } | undefined
+    const data = session.eventAt(seq)?.data as { turn?: unknown } | undefined
     if (typeof data?.turn === 'number') {
       start = Math.min(start, data.turn)
       end = Math.max(end, data.turn)

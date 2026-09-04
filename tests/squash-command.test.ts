@@ -32,7 +32,10 @@ function fakeSession(
   const session = {
     id: header.id,
     header,
-    events,
+    inheritedEventCount: header.inheritedEventCount ?? 0,
+    snapshotEvents: () => Object.freeze([...events]),
+    eventAt: (seq: number) => events[seq],
+    get seq() { return events.length },
     surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
     deriveEventMessage(event: SessionEvent) {
       if (event.type !== 'user/message') return null
@@ -93,7 +96,7 @@ const REVIEW_RECORD = {
 /** The child fixture: seed prefix, seed boundary, two post-fork nodes, and the compaction's landed checkpoint as the surface tail. */
 function childFixture(): Session {
   return fakeSession(
-    { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+    { parentSession: 'session-parent', isSeeded: true, inheritedEventCount: 2, id: 'session-child' },
     [
       { type: 'user/message' },
       { type: 'session/end-seed' },
@@ -258,7 +261,7 @@ describe('executeSquashAction', () => {
   test('an unregistered child session is rejected before compaction', async () => {
     const child = fakeAgent(
       fakeSession(
-        { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+        { parentSession: 'session-parent', isSeeded: true, inheritedEventCount: 2, id: 'session-child' },
         [
           { type: 'user/message' },
           { type: 'session/end-seed' },

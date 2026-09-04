@@ -75,13 +75,12 @@ function renderMessage(message: Message): string {
  * @returns the transcript plus turn coordinates for the envelope facts.
  */
 export function serializeTranscript(session: Session, range: PostForkRange): Transcript {
-  const events = session.events
   const lines: string[] = []
   const turns: number[] = []
   let nodeCount = 0
   for (const seq of session.surface.nodes) {
     if (seq < range.start || seq > range.end) continue
-    const event = events[seq]
+    const event = session.eventAt(seq)
     if (event === undefined) continue
     const turn = (event.data as { turn?: number } | undefined)?.turn
     if (typeof turn === 'number') turns.push(turn)

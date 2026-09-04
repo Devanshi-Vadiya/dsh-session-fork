@@ -500,7 +500,10 @@ function fakeSession(
   const session = {
     id: header.id,
     header,
-    events,
+    inheritedEventCount: header.inheritedEventCount ?? 0,
+    snapshotEvents: () => Object.freeze([...events]),
+    eventAt: (seq: number) => events[seq],
+    get seq() { return events.length },
     surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
     deriveEventMessage(event: SessionEvent) {
       if (event.type !== 'user/message') return null
@@ -550,7 +553,7 @@ const SQUASH_RESULT = {
 /** The squash fixture: child seed prefix + two post-fork nodes + checkpoint tail. */
 function squashChildSession(): Session {
   return fakeSession(
-    { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+    { parentSession: 'session-parent', isSeeded: true, inheritedEventCount: 2, id: 'session-child' },
     [
       { type: 'user/message' },
       { type: 'session/end-seed' },

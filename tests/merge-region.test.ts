@@ -21,14 +21,17 @@ function fakeSession(
   id: string,
   rawEvents: readonly FakeEvent[],
   surfaceSeqs: readonly number[],
-  seedLength = 0,
+  inheritedEventCount = 0,
 ): Session {
   const events = rawEvents.map((raw, seq) => ({ seq, ...raw })) as unknown as SessionEvent[]
   return {
     id,
-    events,
+    snapshotEvents: () => Object.freeze([...events]),
+    eventAt: (seq: number) => events[seq],
+    get seq() { return events.length },
     surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
-    header: { seedLength },
+    header: { isSeeded: true, inheritedEventCount },
+    inheritedEventCount,
   } as unknown as Session
 }
 

@@ -42,10 +42,13 @@ function price(text: string): number {
 function fakeMeter(nodeTokensOf: (seq: number) => number, summaryPrice?: number): TokenMeter {
   return {
     measure(session: Session): TokenMeasurement {
-      const nodes = session.surface.nodes.map(seq => ({ seq, tokens: nodeTokensOf(seq) }))
+      const nodes = session.surface.nodes.map(seq => {
+        const tokens = nodeTokensOf(seq)
+        return { seq, tokens, heuristicTokens: tokens }
+      })
       const total = nodes.reduce((sum, node) => sum + node.tokens, 0)
       return {
-        logRevision: session.events.length,
+        logRevision: session.seq,
         baseline: 'heuristic',
         surfaceDeltaTokens: 0,
         totalTokens: total,
@@ -81,7 +84,10 @@ function fakeSession(header: Partial<SessionHeader>, rawEvents: unknown[], surfa
   const session = {
     id: header.id,
     header,
-    events,
+    inheritedEventCount: header.inheritedEventCount ?? 0,
+    snapshotEvents: () => Object.freeze([...events]),
+    eventAt: (seq: number) => events[seq],
+    get seq() { return events.length },
     surface,
     requestHeader: () => ({ config: { provider: 'fake-provider', model: 'fake-model' } }),
     deriveEventMessage(event: SessionEvent): Message | null {
@@ -154,7 +160,7 @@ function assistantMsg(text: string, interrupted = false): Message {
 /** Message lookup for the meter's per-node pricing. */
 function messageAt(session: Session): (seq: number) => number {
   return (seq: number) => {
-    const event = session.events[seq]
+    const event = session.eventAt(seq)
     if (event === undefined) return 1
     if (event.type === 'user/message') return price(textOf(event.data as Message | undefined))
     if (event.type === 'assistant/message') {
@@ -173,7 +179,7 @@ const LONG_B = 'branch exploration and findings '.repeat(8)
 
 function childFixture(): Session {
   return fakeSession(
-    { id: 'session-child', parentSession: 'session-parent', seedLength: 3, cwd: '/w' },
+    { id: 'session-child', parentSession: 'session-parent', isSeeded: true, inheritedEventCount: 3, cwd: '/w' },
     [
       { type: 'user/message', data: userMsg(LONG_A), surfaceOp: 'append' },
       { type: 'assistant/message', data: { message: assistantMsg(LONG_A) }, surfaceOp: 'append' },
@@ -191,7 +197,7 @@ function childFixture(): Session {
 /** Fold a log back into a surface — the minimal replay the acceptance asks for. */
 function replaySurface(session: Session): number[] {
   const nodes: number[] = []
-  for (const event of session.events) {
+  for (const event of session.snapshotEvents()) {
     const raw = event as unknown as { surfaceOp?: { op?: string; start?: number; end?: number } | string }
     if (raw.surfaceOp === 'append') nodes.push(event.seq)
     else if (typeof raw.surfaceOp === 'object' && raw.surfaceOp?.op === 'replace') {
@@ -206,7 +212,7 @@ function replaySurface(session: Session): number[] {
 describe('squash e2e: vendored engine over the post-fork region', () => {
   test('acceptance #1: compacts exactly the post-fork region; the inherited prefix is untouched', async () => {
     const child = childFixture()
-    const prefixSnapshot = JSON.stringify(child.events.slice(0, 3))
+    const prefixSnapshot = JSON.stringify(child.snapshotEvents().slice(0, 3))
     const agent = fakeAgent(child)
     const result = await compactNow(
       { meter: fakeMeter(messageAt(child)), llm: fakeLlm('branch summary checkpoint') },
@@ -219,19 +225,19 @@ describe('squash e2e: vendored engine over the post-fork region', () => {
     expect(child.surface.nodes.length).toBe(3)
     expect(child.surface.nodes.slice(0, 2)).toEqual([0, 1])
     // Prefix events byte-identical.
-    expect(JSON.stringify(child.events.slice(0, 3))).toBe(prefixSnapshot)
+    expect(JSON.stringify(child.snapshotEvents().slice(0, 3))).toBe(prefixSnapshot)
     // The replacement is a recognized compaction checkpoint.
-    const replacement = child.events[child.surface.nodes[2]!]
+    const replacement = child.eventAt(child.surface.nodes[2]!)
     const message = child.deriveEventMessage(replacement as SessionEvent) as UserMessage
     expect(isCompactCheckpointSource(message.source)).toBe(true)
     // The durable marker ordering: start < summary < replacement < end.
-    const types = child.events.slice(-4).map(event => event.type)
+    const types = child.snapshotEvents().slice(-4).map(event => event.type)
     expect(types).toEqual(['compaction/start', 'compaction/summary', 'user/message', 'compaction/end'])
   })
 
   test('acceptance #3: an interrupted turn inside the region still compacts honestly', async () => {
     const child = childFixture()
-    const interrupted = child.events[4] as unknown as { data: { message: { interrupted?: true } } }
+    const interrupted = child.eventAt(4) as unknown as { data: { message: { interrupted?: true } } }
     expect(interrupted.data.message.interrupted).toBe(true)
     const result = await compactNow(
       { meter: fakeMeter(messageAt(child)), llm: fakeLlm('summary despite interruption') },
@@ -290,7 +296,7 @@ describe('squash e2e: full /squash pipeline into the parent', () => {
       [0, 1],
     )
     // Snapshot captured before delivery: the parent's own log stays intact.
-    const parentSnapshot = JSON.stringify(parent.events)
+    const parentSnapshot = JSON.stringify(parent.snapshotEvents())
     const parentAgent = fakeAgent(parent)
     const state: BranchRegistryState = {
       branches: {
@@ -317,7 +323,7 @@ describe('squash e2e: full /squash pipeline into the parent', () => {
     const { result, parent, parentAgent, parentSnapshot } = await runPipeline()
     expect(JSON.parse(result as string).kind).toBe('success')
     // The parent's own log is untouched — delivery queues in the inbox.
-    expect(JSON.stringify(parent.events)).toBe(parentSnapshot)
+    expect(JSON.stringify(parent.snapshotEvents())).toBe(parentSnapshot)
     expect(parent.surface.nodes).toEqual([0, 1])
     // Exactly one envelope was queued, still a recognized checkpoint.
     expect(parentAgent.injected.length).toBe(1)
@@ -328,7 +334,7 @@ describe('squash e2e: full /squash pipeline into the parent', () => {
     const { parent } = await runPipeline()
     expect(replaySurface(parent)).toEqual([...parent.surface.nodes])
     for (const seq of parent.surface.nodes) {
-      const message = parent.deriveEventMessage(parent.events[seq] as SessionEvent)
+      const message = parent.deriveEventMessage(parent.eventAt(seq) as SessionEvent)
       expect(message).not.toBeNull()
     }
   })
@@ -337,13 +343,13 @@ describe('squash e2e: full /squash pipeline into the parent', () => {
     const { child } = await runPipeline()
     // Every child surface node still derives to a valid message.
     for (const seq of child.surface.nodes) {
-      expect(child.deriveEventMessage(child.events[seq] as SessionEvent)).not.toBeNull()
+      expect(child.deriveEventMessage(child.eventAt(seq) as SessionEvent)).not.toBeNull()
     }
     // And the region is spent: the only post-fork surface node left is the
     // checkpoint itself, so a re-squash has nothing new to compact.
     const remaining = postForkRange(child)
     expect(remaining.start).toBe(remaining.end)
-    const remainingMessage = child.deriveEventMessage(child.events[remaining.start] as SessionEvent) as UserMessage
+    const remainingMessage = child.deriveEventMessage(child.eventAt(remaining.start) as SessionEvent) as UserMessage
     expect(isCompactCheckpointSource(remainingMessage.source)).toBe(true)
   })
 })

@@ -22,8 +22,9 @@
  *   turns (goal rounds, reminders, team messages) render nothing, per the
  *   dsh-llm `MessageSourceMap`.
  * - Fork lineage: a seeded child's log starts with the parent's prefix, so
- *   `header.seedLength` splits inherited events from the child's own work,
- *   and `header.parentSession` names the seed source (SessionHeader).
+ *   `header.inheritedEventCount` splits inherited events from the child's
+ *   own work, and `header.parentSession` names the seed source
+ *   (SessionHeader).
  */
 
 /** Structural slice of one session event the graph consumes. */
@@ -37,7 +38,7 @@ export interface GraphEvent {
 /** Header facts a forked child carries; absent on root sessions. */
 export interface GraphSessionHeader {
   /** Leading events inherited from {@link parentSession} through a seed. */
-  readonly seedLength?: number
+  readonly inheritedEventCount?: number
   /** Session the seed was taken from. */
   readonly parentSession?: string
 }
@@ -412,7 +413,7 @@ async function resolveForkAnchor(
     const turns = extractTurns(log.events)
     const anchor = turnContaining(turns, seq)
     if (anchor === null) return null
-    if (anchor.startSeq >= (log.header.seedLength ?? 0)) {
+    if (anchor.startSeq >= (log.header.inheritedEventCount ?? 0)) {
       // The anchor turn is this session's own work: it owns the node — but
       // it only appears in the graph when this session is a branch target.
       return knownSessions.has(sessionId) ? nodeId(sessionId, anchor.turn) : null
@@ -450,7 +451,7 @@ export async function assembleBranchGraph(
   for (const sessionId of sessionIds) {
     const log = await readSession(sessionId)
     logs.set(sessionId, log)
-    ownTurns.set(sessionId, log === null ? [] : extractTurns(log.events, log.header.seedLength ?? 0))
+    ownTurns.set(sessionId, log === null ? [] : extractTurns(log.events, log.header.inheritedEventCount ?? 0))
   }
 
   // Fork anchor per session, taken from the first record citing one.

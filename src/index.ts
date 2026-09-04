@@ -10,6 +10,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 // Type-only presence import: pulls in this package's Context augmentation
 // (`ctx.sessionPersistence`) without any runtime dependency on it.
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -165,14 +166,16 @@ export const inject = [
 ]
 
 /**
- * Full log (header + events) of each view handed out by {@link makePorts},
- * retained so the seeded fork path can slice the real `SessionEvent`
- * objects and resolve the source's recorded preset. (The view itself only
- * promises `{ seq, type }` + cwd to keep boundary logic testable.)
+ * Full log (header + events + fork cut) of each view handed out by
+ * {@link makePorts}, retained so the seeded fork path can slice the real
+ * `SessionEvent` objects and resolve the source's recorded preset. (The
+ * view itself only promises `{ seq, type }` + cwd to keep boundary logic
+ * testable.)
  */
 interface SourceLog {
   readonly header: SessionHeader
   readonly events: readonly SessionEvent[]
+  readonly inheritedEventCount: number
 }
 
 const sourceLogs = new WeakMap<SourceSessionView, SourceLog>()
@@ -255,16 +258,20 @@ function makePorts(ctx: Context): BranchPorts {
     async readSession(sessionId) {
       const live = ctx.sessions.get(sessionId as Session['id'])
       if (live !== undefined) {
-        const events = [...live.events]
+        const events = live.snapshotEvents()
         const view: SourceSessionView = {
           id: live.id,
           events,
           header: live.header.cwd === undefined ? {} : { cwd: live.header.cwd },
         }
-        sourceLogs.set(view, { header: live.header, events })
+        sourceLogs.set(view, {
+          header: live.header,
+          events,
+          inheritedEventCount: live.inheritedEventCount,
+        })
         return view
       }
-      // Cold path: persistence inspect, like api-proxy's readSessionState.
+      // Cold path: persistence inspect, like the controller's readSessionState.
       // Any inspect failure (including not-found) reports as a missing
       // source; the command layer turns that into a clear user error.
       try {
@@ -274,7 +281,11 @@ function makePorts(ctx: Context): BranchPorts {
           events: [...inspected.events],
           header: inspected.meta.cwd === undefined ? {} : { cwd: inspected.meta.cwd },
         }
-        sourceLogs.set(view, { header: inspected.meta, events: inspected.events })
+        sourceLogs.set(view, {
+          header: inspected.meta,
+          events: inspected.events,
+          inheritedEventCount: inspected.inheritedEventCount,
+        })
         return view
       } catch (error) {
         ctx.logger.debug(
@@ -325,7 +336,10 @@ function makePorts(ctx: Context): BranchPorts {
       // Seed the same default model selection the host's entry points use.
       // Issue #28: the fork notice rides the seed as its final event —
       // atomic with creation, at the inherit/own-history boundary — so
-      // `seedLength` counts it in and any grandchild fork inherits it.
+      // `inheritedEventCount` counts it in and any grandchild fork inherits
+      // it. `isSeeded: true` marks the fork lineage on the header (the
+      // numeric cut travels beside it, never inside the header — the
+      // 0.1.2-rc.1 session boundary contract).
       const seed: SessionEvent[] = events.slice(0, cut)
       if (forkNotice !== undefined) {
         seed.push(forkSeedNoticeEvent(cut, Date.now(), forkNotice))
@@ -334,10 +348,11 @@ function makePorts(ctx: Context): BranchPorts {
       await ctx.agents.create({
         sessionId: childId as Session['id'],
         seed,
+        inheritedEventCount: SessionLogOffset(seed.length),
         meta: {
           ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
           parentSession: source.id as Session['id'],
-          seedLength: seed.length,
+          isSeeded: true,
           ...(forkComposition.agentPreset === undefined ? {} : { agentPreset: forkComposition.agentPreset }),
         },
         ...(defaultModel === undefined ? {} : { agentOptions: defaultModel.currentSelection() }),
@@ -591,26 +606,26 @@ export async function apply(ctx: Context): Promise<void> {
         },
         // Graph assembly reads whole logs: live store first, persistence
         // inspect as the cold fallback — the same order makePorts.readSession
-        // uses, but returning the header lineage facts (seedLength /
-        // parentSession) instead of a fork view.
+        // uses, but returning the header lineage facts
+        // (inheritedEventCount / parentSession) instead of a fork view.
         async readSession(sessionId) {
           const live = ctx.sessions.get(sessionId as Session['id'])
           if (live !== undefined) {
             return {
               header: {
-                ...(live.header.seedLength === undefined ? {} : { seedLength: live.header.seedLength }),
+                inheritedEventCount: live.inheritedEventCount,
                 ...(live.header.parentSession === undefined
                   ? {}
                   : { parentSession: live.header.parentSession as string }),
               },
-              events: [...live.events],
+              events: live.snapshotEvents(),
             }
           }
           try {
             const inspected = await ctx.sessionPersistence.inspect(sessionId as Session['id'])
             return {
               header: {
-                ...(inspected.meta.seedLength === undefined ? {} : { seedLength: inspected.meta.seedLength }),
+                inheritedEventCount: inspected.inheritedEventCount,
                 ...(inspected.meta.parentSession === undefined
                   ? {}
                   : { parentSession: inspected.meta.parentSession as string }),

@@ -310,7 +310,7 @@ function canonicalWorkspace(): {
   ]
   const logs = new Map<string, GraphSessionLog>([
     ['s-root', { header: {}, events: rootEvents }],
-    ['s-child', { header: { seedLength, parentSession: 's-root' }, events: childEvents }],
+    ['s-child', { header: { inheritedEventCount: seedLength, parentSession: 's-root' }, events: childEvents }],
   ])
   return {
     branches: [
@@ -410,8 +410,8 @@ describe('assembleBranchGraph', () => {
     const cEvents = [...bEvents, ...cOwn.map(e => ({ ...e, seq: e.seq + cSeedLength }))]
     const logs = new Map<string, GraphSessionLog>([
       ['s-a', { header: {}, events: aEvents }],
-      ['s-b', { header: { seedLength: bSeedLength, parentSession: 's-a' }, events: bEvents }],
-      ['s-c', { header: { seedLength: cSeedLength, parentSession: 's-b' }, events: cEvents }],
+      ['s-b', { header: { inheritedEventCount: bSeedLength, parentSession: 's-a' }, events: bEvents }],
+      ['s-c', { header: { inheritedEventCount: cSeedLength, parentSession: 's-b' }, events: cEvents }],
     ])
     const branches: BranchLike[] = [
       { name: 'a', sessionId: 's-a', forkOrigin: null },
@@ -459,7 +459,7 @@ describe('assembleBranchGraph', () => {
     const childEvents = sessionEvents([{ turn: 1, subject: 'experiment', time: 25 }])
     const logs = new Map<string, GraphSessionLog>([
       ['s-root', { header: {}, events: rootEvents }],
-      ['s-child', { header: { seedLength: 0, parentSession: 's-root' }, events: childEvents }],
+      ['s-child', { header: { inheritedEventCount: 0, parentSession: 's-root' }, events: childEvents }],
     ])
     const branches: BranchLike[] = [
       { name: 'main', sessionId: 's-root', forkOrigin: null },
@@ -502,7 +502,7 @@ describe('assembleBranchGraph', () => {
     const childEvents = sessionEvents([{ turn: 1, subject: 'experiment', time: 25 }])
     const logs = new Map<string, GraphSessionLog>([
       ['s-root', { header: {}, events: rootEvents }],
-      ['s-child', { header: { seedLength: 0, parentSession: 's-root' }, events: childEvents }],
+      ['s-child', { header: { inheritedEventCount: 0, parentSession: 's-root' }, events: childEvents }],
     ])
     const branches: BranchLike[] = [
       { name: 'main', sessionId: 's-root', forkOrigin: null },
@@ -574,7 +574,7 @@ describe('assembleBranchGraph', () => {
     const expEvents = sessionEvents([{ turn: 1, subject: 'experiment', time: 25 }])
     const logs = new Map<string, GraphSessionLog>([
       ['s-root', { header: {}, events: rootEvents }],
-      ['s-exp', { header: { seedLength: 0, parentSession: 's-root' }, events: expEvents }],
+      ['s-exp', { header: { inheritedEventCount: 0, parentSession: 's-root' }, events: expEvents }],
     ])
     const branches: BranchLike[] = [
       { name: 'main', sessionId: 's-root', forkOrigin: null },
@@ -609,7 +609,7 @@ describe('assembleBranchGraph', () => {
     ]
     const logs = new Map<string, GraphSessionLog>([
       ['s-root', { header: {}, events: rootEvents }],
-      ['s-new', { header: { seedLength: graftSeq + 1, parentSession: 's-root' },
+      ['s-new', { header: { inheritedEventCount: graftSeq + 1, parentSession: 's-root' },
         events: [...rootEvents, ...sessionEvents([{ turn: 2, subject: 'new branch work', time: 30 }])
           .map(event => ({ ...event, seq: event.seq + graftSeq + 1 }))] }],
     ])

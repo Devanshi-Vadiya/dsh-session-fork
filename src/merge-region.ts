@@ -19,13 +19,13 @@
  * Coordinate validity: every fork copies the parent's prefix verbatim with
  * preserved seq numbering, so an ancestor-side `atSeq` below a descendant's
  * seed boundary addresses the same event in the descendant's log. For the
- * direct-parent case the boundary anchors on `header.seedLength` (the
- * durable fork-lineage line), NOT on the last `session/end-seed` —
+ * direct-parent case the boundary anchors on `session.inheritedEventCount`
+ * (the durable fork-lineage line), NOT on the last `session/end-seed` —
  * upstream appends that marker on every seeded construction, cold resumes
  * included, so the last one usually marks the resume that preceded the
  * transfer command itself (see `postForkRange`). The seed slice may still
- * extend past the anchoring `turn/end`, so `seedLength >= atSeq + 1` — the
- * two coordinates are NOT interchangeable.
+ * extend past the anchoring `turn/end`, so `inheritedEventCount >= atSeq + 1`
+ * — the two coordinates are NOT interchangeable.
  *
  * Pure and cordis-free; the same tool-pairing balance gates as squash guard
  * every computed boundary. squash, rebased-into, and merge all consume this one
@@ -37,7 +37,7 @@ import {
   toolPairingBalancedAfter,
   toolPairingBalancedBefore,
 } from '@deepseek-ai/dsh-compaction'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { postForkRange, SquashCoreError } from './squash.js'
 import type { PostForkRangeOptions } from './squash.js'
 import type { RegistryState } from './types.js'
@@ -60,9 +60,9 @@ export interface MergeRegion {
   /** Discriminant: a computed region. */
   readonly kind: 'ok'
   /** Inclusive first source surface seq of the transfer region. */
-  readonly start: number
+  readonly start: SessionSeq
   /** Inclusive last source surface seq of the transfer region. */
-  readonly end: number
+  readonly end: SessionSeq
   /** How the two branches relate; consumers word envelopes with it. */
   readonly relation: MergeRelation
   /** Session id of the lowest common ancestor, when one exists. */
@@ -240,7 +240,7 @@ function wholeRegion(session: Session, balance?: boolean): MergeRegionResult {
  */
 function settleRegion(
   session: Session,
-  nodes: readonly number[],
+  nodes: readonly SessionSeq[],
   relation: MergeRelation,
   lcaSessionId: string | undefined,
   balance?: boolean,

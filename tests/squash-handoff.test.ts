@@ -42,7 +42,10 @@ function fakeSession(
   return {
     id: header.id,
     header,
-    events,
+    inheritedEventCount: header.inheritedEventCount ?? 0,
+    snapshotEvents: () => Object.freeze([...events]),
+    eventAt: (seq: number) => events[seq],
+    get seq() { return events.length },
     surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
     deriveEventMessage(event: SessionEvent) {
       if (event.type !== 'user/message') return null
@@ -67,7 +70,7 @@ function checkpointUserMessage(compactionId: string, text: string): UserMessage 
 
 function childFixture(): Session {
   return fakeSession(
-    { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+    { parentSession: 'session-parent', isSeeded: true, inheritedEventCount: 2, id: 'session-child' },
     [
       { type: 'user/message' },
       { type: 'session/end-seed' },
@@ -278,7 +281,7 @@ describe('dispatchSquash (running source)', () => {
     // post-cancellation idle surface, where the cancelled turn's official
     // turn/end has closed the step.
     const running = fakeSession(
-      { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+      { parentSession: 'session-parent', isSeeded: true, inheritedEventCount: 2, id: 'session-child' },
       [
         { type: 'user/message' },
         { type: 'session/end-seed' },
@@ -288,7 +291,7 @@ describe('dispatchSquash (running source)', () => {
       [0, 2, 3],
     )
     const postCancel = fakeSession(
-      { parentSession: 'session-parent', seedLength: 2, id: 'session-child' },
+      { parentSession: 'session-parent', isSeeded: true, inheritedEventCount: 2, id: 'session-child' },
       [
         { type: 'user/message' },
         { type: 'session/end-seed' },

@@ -2,11 +2,13 @@
  * VENDORED FROM: deepseek-harness@99f6f02fecdb7dff40c3fbc9470f5907c29f74ca
  * (copied 2026-08-21)
  *
- * - packages/bundle/base/cordis.patch.yml:39-44 — the web deployment's
- *   `session-title` composition. Its `maxTitleBytes: 80` is the UTF-8 byte
- *   budget the mounted SessionTitleService enforces on every accepted title,
- *   `session.rename` included — so it is the byte ceiling a branch name must
- *   fit to survive that rename byte-for-byte unmodified.
+ * - packages/bundle/base/cordis.patch.yml:48-53 — the web deployment's
+ *   `session-title` composition (moved from 39-44 as the bundle manifest
+ *   grew; re-verified unchanged at dsh 0.1.2-rc.1). Its `maxTitleBytes: 80`
+ *   is the UTF-8 byte budget the mounted SessionTitleService enforces on
+ *   every accepted title, `session.rename` included — so it is the byte
+ *   ceiling a branch name must fit to survive that rename byte-for-byte
+ *   unmodified.
  *
  * The limit is not importable as code: upstream ships it only inside the
  * deployment's YAML composition, and the running service keeps its resolved

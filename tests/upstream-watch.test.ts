@@ -11,9 +11,11 @@
  * pinning the literal call sites in the published client bundles.
  *
  * On failure: do NOT relax the assertion. Re-read the upstream sources
- * (deepseek-harness ui-workspace/src/client/index.ts and
- * ui-conversation/src/client/apply.ts), find the new call/resolution shape,
- * and re-anchor the interception accordingly before upgrading the pin.
+ * (deepseek-harness ui-workspace/src/client/index.ts — the sole remaining
+ * official fork affordance as of 0.1.2-rc.1; ui-conversation dropped its
+ * turn-tail branch button in that release), find the new call/resolution
+ * shape, and re-anchor the interception accordingly before upgrading the
+ * pin.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -38,19 +40,29 @@ function clientBundle(packageName: string): string {
 }
 
 describe('upstream watch: official fork call sites', () => {
-  test('ui-workspace still resolves ctx.sessions.fork by runtime property lookup', () => {
+  test('ui-workspace still resolves sessions.fork by runtime property lookup', () => {
     const bundle = clientBundle('@deepseek-ai/dsh-client-ui-workspace')
-    // The sidebar row menu's forkSession body. A closure capture
-    // (`const fork = ctx.sessions.fork`) would remove this literal.
-    expect(bundle).toContain('ctx.sessions.fork(')
+    // The sidebar row menu's forkSession body (0.1.2-rc.1 shape: the apply
+    // closure destructures `const sessions = ctx.get('sessions')` once and
+    // reads `.fork` off that same service object at click time — same
+    // interception target as the old `ctx.sessions.fork(` literal). A
+    // closure capture (`const fork = sessions.fork`) would remove this
+    // literal.
+    expect(bundle).toContain('sessions.fork({')
     // The intercepted options must keep flowing (increaseTitle included).
     expect(bundle).toContain('increaseTitle: true')
   })
 
-  test('ui-conversation still routes the turn-tail branch button through sessions.fork', () => {
+  test('ui-conversation no longer ships a fork entry (turn-tail branch button removed upstream)', () => {
     const bundle = clientBundle('@deepseek-ai/dsh-client-ui-conversation')
-    // The turn-tail forkAt body.
-    expect(bundle).toContain('sessions.fork({')
-    expect(bundle).toContain('atSeq')
+    // 0.1.2-rc.1 removed the turn-tail branch button (`forkAt` with atSeq)
+    // from ui-conversation entirely — the sidebar fork in ui-workspace is
+    // the only official fork affordance left. Pin that absence so a future
+    // re-introduction fails loudly here: on failure, re-read the upstream
+    // ui-conversation client source, find the new call/resolution shape,
+    // and re-anchor the pin (and, if the call captures the method instead
+    // of property-looking it up, the interception itself).
+    expect(bundle).not.toContain('sessions.fork')
+    expect(bundle).not.toContain('atSeq')
   })
 })

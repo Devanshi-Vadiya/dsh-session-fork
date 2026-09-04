@@ -25,7 +25,9 @@ function fakeSession(rawEvents: readonly FakeEvent[], surfaceSeqs: readonly numb
     return data?.message ?? null
   }
   return {
-    events,
+    snapshotEvents: () => Object.freeze([...events]),
+    eventAt: (seq: number) => events[seq],
+    get seq() { return events.length },
     surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
     deriveEventMessage,
   } as unknown as Session

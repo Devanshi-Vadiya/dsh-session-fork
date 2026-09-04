@@ -113,8 +113,11 @@ describe('vendor marker integrity', () => {
     expect(markers('surgery')).toBe(2)
   })
 
-  test('exactly four [fork:adapt] markers', () => {
-    expect(markers('adapt')).toBe(4)
+  test('exactly five [fork:adapt] markers', () => {
+    // Four at 528c682e; the fifth is the 0.1.2-rc.1 readState alignment
+    // (snapshotEvents + inheritedEventCount — see the marker at the live
+    // readState path).
+    expect(markers('adapt')).toBe(5)
   })
 
   test('records the upstream commit SHAs', () => {
@@ -139,7 +142,7 @@ describe('vendored session-title limit integrity', () => {
 
   test('records the upstream commit SHA and the exact YAML source', () => {
     expect(source).toContain('99f6f02fecdb7dff40c3fbc9470f5907c29f74ca')
-    expect(source).toContain('packages/bundle/base/cordis.patch.yml:39-44')
+    expect(source).toContain('packages/bundle/base/cordis.patch.yml:48-53')
   })
 
   test('pins the vendored byte budget to upstream maxTitleBytes', () => {

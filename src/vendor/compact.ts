@@ -1,11 +1,14 @@
 /**
  * VENDORED FROM: deepseek-harness@528c682e061696f5a160f363f236ecbf53cbd006
- * (copied 2026-08-21)
+ * (copied 2026-08-21; re-aligned against dsh 0.1.2-rc.1 on 2026-09-04 —
+ * upstream region.ts grew to 559 lines and summarizer.ts to 224)
  *
  * - packages/compaction/compaction-basic/src/index.ts:368-420 — the
  *   `compactNow` idle shell: runMaintenance wrap, AbortSignal.any fusion,
- *   busy/cancelled ManualCompactionError classification.
- * - packages/compaction/compaction-basic/src/region.ts:136-550 — the
+ *   busy/cancelled ManualCompactionError classification. (Upstream index.ts
+ *   restructured its automatic-compaction halves since; the shell's cited
+ *   semantics are those captured at 528c682e and are unchanged upstream.)
+ * - packages/compaction/compaction-basic/src/region.ts:27-135 — the
  *   `compactSurfaceRegion` transaction and its helpers:
  *   validateSurfaceRegion / prepareCompaction / summarizeCompaction /
  *   assertSelectedSpanStable / commitCompactionBody / completeCompaction /
@@ -14,11 +17,11 @@
  *   PreparedCompaction, SummarizedCompaction, CompactionTransactionOptions,
  *   CompactionEntryState, SurfaceChangedError, StabilityCheck,
  *   TransactionFailure) come from the block immediately above the cited span
- *   (region.ts:27-89), vendored verbatim.
+ *   (region.ts:27-98), vendored verbatim.
  * - packages/compaction/compaction-basic/src/summarizer.ts:31-224 —
  *   summarizeWithLlm / COMPACTION_INSTRUCTION / CHECKPOINT_PREAMBLE /
  *   frameSummary / finishError / summaryText. SummaryConfig comes from
- *   summarizer.ts:14-18 and SummarizationInput from summarizer.ts:78-85,
+ *   summarizer.ts:14-18 and SummarizationInput from summarizer.ts:60-85,
  *   just above the cited span.
  *
  * The shell's `regionDependencies()` binding comes from
@@ -26,19 +29,22 @@
  * below the cited span.
  *
  * Deliberately NOT vendored:
- * - `selectCompactableRange` (region.ts:98-134) — see the [fork:surgery]
+ * - `selectCompactableRange` (region.ts:98-135) — see the [fork:surgery]
  *   marker at `compactNow`: the entry takes an explicit region and there is
  *   no automatic selection fallback.
- * - `assertWholeSurfaceUnchanged` (region.ts:386-396) — see the [fork:adapt]
+ * - `assertWholeSurfaceUnchanged` (region.ts:396-407) — see the [fork:adapt]
  *   marker at the transaction's stability check.
+ * - `assertNoActiveCompaction` (region.ts:302-315) — an automatic-pressure
+ *   recheck; squash is command-driven and the transaction's own entry-state
+ *   check already gates it.
  * - the config layer (config.ts resolveConfig / resolveTargetPolicy and the
  *   modelPolicies schema) — see the [fork:adapt] marker at
  *   DEFAULT_SUMMARY_CONFIG: this plugin supports no model-level compaction
  *   overrides.
  * - the automatic-compaction halves of the engine (compactIfNeeded, the
- *   agent/pre-step and request-error listeners, assertNoActiveCompaction) —
- *   squash is an explicit command-driven operation; automatic pressure
- *   compaction is out of scope.
+ *   agent/pre-step and request-error listeners) — squash is an explicit
+ *   command-driven operation; automatic pressure compaction is out of
+ *   scope.
  *
  * Vendor policy (dsh-session-fork vendor-replication standard): every deviation
  * from upstream carries exactly one marker —
@@ -79,11 +85,12 @@ import type {
   ToolSchema,
   UserMessage,
 } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
+import { SessionSeq as sessionSeq } from '@deepseek-ai/dsh-session'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 
 // ---------------------------------------------------------------------------
-// support types — region.ts:27-89 and summarizer.ts:14-18/78-85, verbatim
+// support types — region.ts:27-98 and summarizer.ts:14-18/60-85, verbatim
 // ---------------------------------------------------------------------------
 
 // [fork:adapt] RegionDependencies restated: upstream declares this interface
@@ -96,11 +103,11 @@ export interface RegionDependencies {
 
 /** One validated inclusive span of current surface positions. */
 interface SurfaceSelection {
-  readonly start: number
-  readonly end: number
+  readonly start: SessionSeq
+  readonly end: SessionSeq
   readonly startIdx: number
   readonly endIdx: number
-  readonly shadowedSeqs: readonly number[]
+  readonly shadowedSeqs: readonly SessionSeq[]
 }
 
 /** A selection with its priced snapshot and the replay input built from it. */
@@ -108,6 +115,8 @@ interface PreparedCompaction extends SurfaceSelection {
   readonly measurement: TokenMeasurement
   readonly selectedNodes: TokenMeasurement['nodes']
   readonly shadowedTokenCount: number
+  /** Route-priced total of the selected span; the shrink comparison's unit. */
+  readonly shadowedRouteTokenCount: number
   readonly input: SummarizationInput
 }
 
@@ -129,7 +138,7 @@ interface CompactionTransactionOptions {
 interface CompactionEntryState {
   readonly openTurn: number | null
   readonly unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined
-  readonly latestEndSeedSeq: number | undefined
+  readonly latestEndSeedSeq: SessionSeq | undefined
 }
 
 /**
@@ -442,9 +451,9 @@ export interface CompactNowDeps {
 /** One explicit compaction request, naming the region by surface position. */
 export interface CompactRegionRequest {
   /** Inclusive first surface-node seq of the region to compact. */
-  readonly start: number
+  readonly start: SessionSeq
   /** Inclusive last surface-node seq of the region to compact. */
-  readonly end: number
+  readonly end: SessionSeq
   /** Optional durability checkpoint after a successfully closed bracket. */
   readonly flush?: () => Promise<void>
   /** Manual command that initiated this transaction, when present. */
@@ -524,7 +533,7 @@ export async function compactNow(
 }
 
 // ---------------------------------------------------------------------------
-// compactSurfaceRegion + helpers — packages/compaction/compaction-basic/src/region.ts:136-550
+// compactSurfaceRegion + helpers — packages/compaction/compaction-basic/src/region.ts:142-559
 // ---------------------------------------------------------------------------
 
 /**
@@ -546,15 +555,15 @@ export async function compactNow(
 export async function compactSurfaceRegion(
   dependencies: RegionDependencies,
   session: Session,
-  start: number,
-  end: number,
+  start: SessionSeq,
+  end: SessionSeq,
   agent: Agent,
   options: CompactionTransactionOptions,
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
   if (options.owner === null) signal?.throwIfAborted()
   const selection = validateSurfaceRegion(session, start, end)
-  const entryState = inspectCompactionEntryState(session.events)
+  const entryState = inspectCompactionEntryState(session)
   assertCompactionInactive(
     entryState.unmatchedCompactionStart,
     entryState.latestEndSeedSeq,
@@ -684,7 +693,7 @@ function throwManualFailure(failure: TransactionFailure): never {
  */
 function assertCompactionInactive(
   unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined,
-  latestEndSeedSeq: number | undefined,
+  latestEndSeedSeq: SessionSeq | undefined,
   stage: string,
 ): void {
   if (unmatchedCompactionStart === undefined
@@ -697,7 +706,7 @@ function assertCompactionInactive(
 }
 
 /** Validate one requested surface-position span before asynchronous work begins. */
-function validateSurfaceRegion(session: Session, start: number, end: number): SurfaceSelection {
+function validateSurfaceRegion(session: Session, start: SessionSeq, end: SessionSeq): SurfaceSelection {
   const nodes = session.surface.nodes
   const startIdx = nodes.indexOf(start)
   const endIdx = nodes.indexOf(end)
@@ -734,7 +743,12 @@ function prepareCompaction(
     ...selection,
     measurement,
     selectedNodes,
-    shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
+    // The shadow-price protocol prices replacements with the fixed heuristic
+    // so the O(1) projection fold stays in agreement with its own appends;
+    // retention, range selection, and the shrink comparison read the
+    // route-priced `tokens` instead.
+    shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0),
+    shadowedRouteTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
     input: buildSummarizationInput(session, selection.shadowedSeqs),
   }
 }
@@ -754,9 +768,12 @@ async function summarizeCompaction(
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
   const framedSummaryTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
-  if (framedSummaryTokenCount >= prepared.shadowedTokenCount) {
+  // The checkpoint is text-only, so its fixed-heuristic price IS its route
+  // price; comparing it against the span's route price asks the real
+  // question — does the replacement lower the next request's pressure.
+  if (framedSummaryTokenCount >= prepared.shadowedRouteTokenCount) {
     throw new Error(
-      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedTokenCount})`,
+      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedRouteTokenCount})`,
     )
   }
   return {
@@ -866,7 +883,7 @@ function completeCompaction(
  * @returns the replayed conversation prefix to condense.
  */
 // [fork:surgery] full-surface summarization input. Upstream
-// buildSummarizationInput (region.ts:498-514) replays ONLY the shadowed
+// buildSummarizationInput (region.ts:508-523) replays ONLY the shadowed
 // region after the header: for an automatic head compaction that prefix is
 // byte-identical to the last routed request and hits the provider's warm KV
 // cache, but a post-fork region sits at the mid/tail of the surface, the
@@ -880,13 +897,12 @@ function completeCompaction(
 // treats everything earlier as established context.
 function buildSummarizationInput(
   session: Session,
-  shadowedSeqs: readonly number[],
+  shadowedSeqs: readonly SessionSeq[],
 ): SummarizationInput {
   const header = session.requestHeader()
-  const events = session.events
   const messages = session.surface.nodes
     // surface nodes are current surface seqs, so each is a valid log index.
-    .map(seq => session.deriveEventMessage(events[seq]!))
+    .map(seq => session.deriveEventMessage(session.eventAt(seq)!))
     .filter((message): message is Message => message !== null)
   return {
     ...header?.system === undefined ? {} : { system: header.system },
@@ -897,14 +913,15 @@ function buildSummarizationInput(
 }
 
 /** Inspect open-turn, unmatched-compaction, and latest seed-boundary state independently. */
-function inspectCompactionEntryState(events: readonly SessionEvent[]): CompactionEntryState {
+function inspectCompactionEntryState(session: Session): CompactionEntryState {
   let openTurn: number | null = null
   let openTurnStateKnown = false
   let unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined
   let compactionEntryStateKnown = false
-  let latestEndSeedSeq: number | undefined
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]!
+  let latestEndSeedSeq: SessionSeq | undefined
+  for (let offset: number = session.seq - 1; offset >= 0; offset -= 1) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const event = session.eventAt(sessionSeq(offset))!
     if (latestEndSeedSeq === undefined && event.type === 'session/end-seed') {
       latestEndSeedSeq = event.seq
     }

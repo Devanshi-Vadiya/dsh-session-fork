@@ -35,14 +35,14 @@ interface FakeEvent {
  * tool-pairing balance is computed by the real
  * `toolPairingBalancedBefore/After` imports over these events.
  *
- * `seedLength` defaults to 0 (a forked child with an empty prefix — the
- * first end-seed in the log is the construction marker, matching every
+ * `inheritedEventCount` defaults to 0 (a forked child with an empty prefix —
+ * the first end-seed in the log is the construction marker, matching every
  * single-marker fixture); pass `null` for a ROOT session (no fork lineage).
  */
 function fakeSession(
   rawEvents: readonly FakeEvent[],
   surfaceSeqs: readonly number[],
-  seedLength?: number | null,
+  inheritedEventCount?: number | null,
 ): Session {
   const events = rawEvents.map((raw, seq) => ({ seq, ...raw })) as unknown as SessionEvent[]
   const deriveEventMessage = (event: SessionEvent): Message | null => {
@@ -51,10 +51,17 @@ function fakeSession(
     return data?.message ?? null
   }
   return {
-    events,
+    snapshotEvents: () => Object.freeze([...events]),
+    eventAt: (seq: number) => events[seq],
+    get seq() { return events.length },
     surface: { nodes: [...surfaceSeqs], replaceGeneration: 1 },
     deriveEventMessage,
-    ...(seedLength === null ? { header: {} } : { header: { seedLength: seedLength ?? 0 } }),
+    ...(inheritedEventCount === null
+      ? { header: {}, inheritedEventCount: 0 }
+      : {
+        header: { isSeeded: true, inheritedEventCount: inheritedEventCount ?? 0 },
+        inheritedEventCount: inheritedEventCount ?? 0,
+      }),
   } as unknown as Session
 }
 

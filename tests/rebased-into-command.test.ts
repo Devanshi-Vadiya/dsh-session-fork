@@ -25,7 +25,10 @@ function fakeSession(header: Partial<SessionHeader>, rawEvents: readonly FakeEve
   return {
     id: header.id,
     header,
-    events,
+    inheritedEventCount: header.inheritedEventCount ?? 0,
+    snapshotEvents: () => Object.freeze([...events]),
+    eventAt: (seq: number) => events[seq],
+    get seq() { return events.length },
     surface: { nodes: rawEvents.map((_, i) => i).filter(i => events[i]!.type !== 'session/end-seed'), replaceGeneration: 1 },
     deriveEventMessage(event: SessionEvent) {
       if (event.type !== 'user/message') return null
@@ -72,7 +75,7 @@ function registryFixture(): RegistryState {
 /** The source fixture: an inherited prefix, the seed boundary, one own turn. */
 function sourceFixture(): Session {
   return fakeSession(
-    { id: CHILD_SESSION_ID, parentSession: 'session-parent', seedLength: 1 },
+    { id: CHILD_SESSION_ID, parentSession: 'session-parent', isSeeded: true, inheritedEventCount: 1 },
     [
       {
         type: 'user/message',

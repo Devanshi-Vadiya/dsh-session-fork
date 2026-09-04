@@ -21,6 +21,15 @@
  * 1569-1659): the checkout advanced past 99f6f02f before that kernel was
  * copied.
  *
+ * Re-aligned against dsh 0.1.2-rc.1 (2026-09-04): the api-proxy helpers
+ * moved into packages/api/session-controller (readSessionState at
+ * commands.ts:478-485, forkWorkspace at commands.ts:487-500, composeAgent at
+ * agent.ts:371-387, the fork handler at commands.ts:185-282). Semantics are
+ * unchanged except the 0.1.2-rc.1 session boundary: the live log read is
+ * `snapshotEvents()` and the fork lineage fact is `inheritedEventCount`
+ * (beside the header, with `isSeeded` marking it) instead of
+ * `header.seedLength`.
+ *
  * Vendor policy (dsh-session-fork vendor-replication standard): every deviation
  * from upstream carries exactly one marker —
  * - `[fork:adapt]`   mechanical adaptation, no semantic change (injected
@@ -281,10 +290,12 @@ export function anchoredBoundaryOf(
 // without changing ensureSession's semantics.
 // ---------------------------------------------------------------------------
 
-/** Live-first session state the resume kernel needs (header + event log). */
+/** Live-first session state the resume kernel needs (header + event log + fork cut). */
 export interface ReadSessionState {
   readonly header: SessionHeader
   readonly events: readonly SessionEvent[]
+  /** Leading events inherited from the fork parent (0.1.2-rc.1 session boundary). */
+  readonly inheritedEventCount: number
 }
 
 /** What the kernel contributes to a resume: the identity and the composed setup. */
@@ -411,11 +422,23 @@ export function getOrResumeDeps(ctx: Context): GetOrResumeDeps {
     readState: async (sessionId) => {
       const live = ctx.sessions.get(sessionId)
       if (live !== undefined) {
-        return { header: live.header, events: [...live.events] }
+        // [fork:adapt] mirrors the controller's readSessionState live path
+        // (commands.ts:478-485): a frozen snapshotEvents() read plus the
+        // exact fork cut; the vendor copy additionally records the cut so
+        // fork reconstruction keeps its lineage facts.
+        return {
+          header: live.header,
+          events: live.snapshotEvents(),
+          inheritedEventCount: live.inheritedEventCount,
+        }
       }
       try {
         const inspected = await ctx.sessionPersistence.inspect(sessionId)
-        return { header: inspected.meta, events: [...inspected.events] }
+        return {
+          header: inspected.meta,
+          events: [...inspected.events],
+          inheritedEventCount: inspected.inheritedEventCount,
+        }
       } catch {
         return null
       }
