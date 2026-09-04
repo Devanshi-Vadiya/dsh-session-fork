@@ -11,10 +11,15 @@
  * - packages/host/apiproxy/src/api-proxy.ts:1196-1217 — `composeAgent`
  *   helper (resolve the preset before creation; mount it in setup).
  *
- * The handler's `resolveSessionPreset` helper lives in
- * ./resolve-session-preset.ts: upstream removed the export in b8dfa8b892
- * (agentPreset projection replaced it), so the helper is vendored there with
- * its own VENDORED FROM header.
+ * The handler's `resolveSessionPreset` helper that used to live in
+ * ./resolve-session-preset.ts is gone — upstream replaced the event-scan
+ * with the `agentPreset` projection read in dsh 0.1.2-rc.1
+ * (agent.ts:504-509, the same `presetForObservation(observation)`). The
+ * projection fold is what the kernel now consumes; the plugin migrates
+ * the default readState wiring to `ctx.sessionQuery.observeSession` and
+ * resolves the preset from `observation.projections.values.agentPreset`
+ * (with the header fallback when the projection registry is absent) — no
+ * vendored scanner remains.
  *
  * `getOrResumeAgent` at the end of this file is a later addition carrying its
  * own VENDORED FROM header (deepseek-harness@528c682e…, api-proxy.ts:1078 +
@@ -28,7 +33,8 @@
  * unchanged except the 0.1.2-rc.1 session boundary: the live log read is
  * `snapshotEvents()` and the fork lineage fact is `inheritedEventCount`
  * (beside the header, with `isSeeded` marking it) instead of
- * `header.seedLength`.
+ * `header.seedLength`. The `agentPreset` projection now owns the
+ * preset-resolution half of fork reconstruction.
  *
  * Vendor policy (dsh-session-fork vendor-replication standard): every deviation
  * from upstream carries exactly one marker —
@@ -41,13 +47,18 @@
  */
 
 import type { SourceEvent } from '../branch.js'
-import { resolveSessionPreset } from './resolve-session-preset.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 // Type-only presence import: pulls in this package's Context augmentation
 // (`ctx.sessionPersistence`) without any runtime dependency on it.
 import type {} from '@deepseek-ai/dsh-session-persistence'
+// Same presence pattern for the session-query service (`ctx.sessionQuery`),
+// and the projection augmentation that makes `.projections.values.agentPreset`
+// typecheck here (mirroring api/session-controller/agent.ts:504-509).
+import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
+import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 
 /** Header fields the vendored helpers consume. */
 export interface VendoredSourceHeader {
@@ -290,12 +301,19 @@ export function anchoredBoundaryOf(
 // without changing ensureSession's semantics.
 // ---------------------------------------------------------------------------
 
-/** Live-first session state the resume kernel needs (header + event log + fork cut). */
+/** Live-first session state the resume kernel needs (header + event log + fork cut + resolved preset). */
 export interface ReadSessionState {
   readonly header: SessionHeader
   readonly events: readonly SessionEvent[]
   /** Leading events inherited from the fork parent (0.1.2-rc.1 session boundary). */
   readonly inheritedEventCount: number
+  /**
+   * The preset the source actually runs under, resolved from the agentPreset
+   * projection at read time (the dsh 0.1.2-rc.1 canonical path — the same
+   * `presetForObservation(observation)` upstream applies). `undefined`
+   * when the deployment composes none.
+   */
+  readonly agentPreset?: string
 }
 
 /** What the kernel contributes to a resume: the identity and the composed setup. */
@@ -377,7 +395,7 @@ export async function getOrResumeAgent(
           `getOrResumeAgent: session "${sessionId}" not found — a squash parent must already exist`,
         )
       }
-      const storedPreset = resolveSessionPreset(stored)
+      const storedPreset = stored.agentPreset
       return (await deps.resume({
         resumeSessionId: sessionId,
         setup: (await deps.composeSetup(storedPreset)).setup,
@@ -400,15 +418,17 @@ export async function getOrResumeAgent(
  * Default production wiring for {@link getOrResumeAgent}: the api-proxy
  * closures the vendored kernel captures upstream, rebuilt over one cordis
  * context. `resume` pre-binds the host default model selection as
- * agentOptions, `readState` reads live-first (sessions store, else
- * persistence inspect — the same pattern as the /branch fork path), and
- * `composeSetup` resolves the recorded preset through the vendored
- * composeAgent.
- * @param ctx - host context providing agents/sessions/sessionPersistence and optional agentPresets/agentDefaultModel.
+ * agentOptions, `readState` reads live-first via the session-query
+ * observation (matching api/session-controller/agent.ts:422-457 — one
+ * read carries header, fork cut, frozen events, and the resolved
+ * agentPreset projection), and `composeSetup` resolves the recorded
+ * preset through the vendored composeAgent.
+ * @param ctx - host context providing agents/sessionQuery/agentPresets/agentDefaultModel.
  * @returns deps bound to the context services.
  */
 export function getOrResumeDeps(ctx: Context): GetOrResumeDeps {
   const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+  const sessionQuery = ctx.get('sessionQuery') as { observeSession(sessionId: Session['id']): Promise<SessionObservation> } | undefined
   return {
     get: sessionId => ctx.agents.get(sessionId),
     resume: async (request) => {
@@ -420,27 +440,27 @@ export function getOrResumeDeps(ctx: Context): GetOrResumeDeps {
       })
     },
     readState: async (sessionId) => {
-      const live = ctx.sessions.get(sessionId)
-      if (live !== undefined) {
-        // [fork:adapt] mirrors the controller's readSessionState live path
-        // (commands.ts:478-485): a frozen snapshotEvents() read plus the
-        // exact fork cut; the vendor copy additionally records the cut so
-        // fork reconstruction keeps its lineage facts.
-        return {
-          header: live.header,
-          events: live.snapshotEvents(),
-          inheritedEventCount: live.inheritedEventCount,
-        }
-      }
+      // [fork:adapt] mirrors agent.ts:resumeObserved (commands.ts:244 for the
+      // fork path). One observation covers live-first lookup, the fork cut,
+      // and the preset projection — the previous live/inspect split is gone.
+      // `null` propagates to the kernel's "not found" throw.
+      let observation: SessionObservation | undefined
       try {
-        const inspected = await ctx.sessionPersistence.inspect(sessionId)
-        return {
-          header: inspected.meta,
-          events: [...inspected.events],
-          inheritedEventCount: inspected.inheritedEventCount,
+        try {
+          observation = await sessionQuery!.observeSession(sessionId)
+        } catch (error) {
+          if (error instanceof SessionQueryError
+            && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') return null
+          return null
         }
-      } catch {
-        return null
+        return {
+          header: observation.header,
+          events: observation.events,
+          inheritedEventCount: observation.inheritedEventCount,
+          agentPreset: observation.projections?.values.agentPreset ?? observation.header.agentPreset,
+        }
+      } finally {
+        observation?.[Symbol.dispose]()
       }
     },
     composeSetup: (presetId) => composeAgent(

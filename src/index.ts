@@ -14,6 +14,10 @@ import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 // Type-only presence import: pulls in this package's Context augmentation
 // (`ctx.sessionPersistence`) without any runtime dependency on it.
 import type {} from '@deepseek-ai/dsh-session-persistence'
+// Same presence pattern for the session-query service the read pipeline
+// uses (`ctx.sessionQuery`), with its observation + error taxonomy.
+import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
+import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
 // Same presence pattern for the compaction services the squash pipeline
 // consumes (`ctx.llm`, `ctx.tokenMeter`).
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
@@ -22,6 +26,10 @@ import type {} from '@deepseek-ai/dsh-token-meter'
 // Same presence pattern for the prompt-assembly service the vocabulary
 // section registers into (`ctx.systemPrompt`, issue #28).
 import type {} from '@deepseek-ai/dsh-system-prompt'
+// Presence import for the agentPreset projection: pulls in the
+// SessionProjectionMap augmentation so `observation.projections.values.agentPreset`
+// typechecks here without importing the implementation at runtime.
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { ArchiveOutcome, BranchPorts, SourceSessionView } from './branch.js'
 import { BranchArchiveError, BranchForkError } from './branch.js'
 import { executeBranchAction, parseBranchAction, createNamedBranch } from './command.js'
@@ -58,7 +66,6 @@ import {
 import { createDomainStore, dshForkDomainSpec } from './store.js'
 import type { DomainLike } from './store.js'
 import { compactNow } from './vendor/compact.js'
-import { resolveSessionPreset } from './vendor/resolve-session-preset.js'
 import { composeAgent, forkWorkspace, getOrResumeAgent, getOrResumeDeps } from './vendor/fork.js'
 import type { AgentPresetsLike, WorkspaceLike } from './vendor/fork.js'
 
@@ -156,6 +163,7 @@ export const inject = [
   'storageDomain',
   'sessions',
   'sessionPersistence',
+  'sessionQuery',
   'agents',
   'tokenMeter',
   'llm',
@@ -166,16 +174,18 @@ export const inject = [
 ]
 
 /**
- * Full log (header + events + fork cut) of each view handed out by
- * {@link makePorts}, retained so the seeded fork path can slice the real
- * `SessionEvent` objects and resolve the source's recorded preset. (The
- * view itself only promises `{ seq, type }` + cwd to keep boundary logic
- * testable.)
+ * Full log (header + events + fork cut + resolved preset) of each view
+ * handed out by {@link makePorts}, retained so the seeded fork path can
+ * slice the real `SessionEvent` objects and feed the parent's recorded
+ * preset through {@link composeAgent} (the upstream `agentPreset`
+ * projection read of dsh-session-query). The view itself only promises
+ * `{ seq, type }` + cwd to keep boundary logic testable.
  */
 interface SourceLog {
   readonly header: SessionHeader
   readonly events: readonly SessionEvent[]
   readonly inheritedEventCount: number
+  readonly agentPreset?: string
 }
 
 const sourceLogs = new WeakMap<SourceSessionView, SourceLog>()
@@ -254,44 +264,49 @@ function makeArchiveSession(ctx: Context): (sessionId: string) => Promise<Archiv
 
 /** Build the fork ports over live-first session reads. */
 function makePorts(ctx: Context): BranchPorts {
+  const sessionQuery = ctx.get('sessionQuery') as { observeSession(sessionId: Session['id'], options?: { projectionMode?: 'all' | 'none' }): Promise<SessionObservation> } | undefined
   return {
     async readSession(sessionId) {
-      const live = ctx.sessions.get(sessionId as Session['id'])
-      if (live !== undefined) {
-        const events = live.snapshotEvents()
-        const view: SourceSessionView = {
-          id: live.id,
-          events,
-          header: live.header.cwd === undefined ? {} : { cwd: live.header.cwd },
-        }
-        sourceLogs.set(view, {
-          header: live.header,
-          events,
-          inheritedEventCount: live.inheritedEventCount,
-        })
-        return view
-      }
-      // Cold path: persistence inspect, like the controller's readSessionState.
-      // Any inspect failure (including not-found) reports as a missing
-      // source; the command layer turns that into a clear user error.
+      // Single live-first read over session-query: returns a frozen cut of
+      // (header, inheritedEventCount, events, projections) — the projection
+      // fold replaces the vendored event-scan for the agentPreset, and the
+      // observation's lease is disposed before the call returns while the
+      // retained frozen arrays stay valid (upstream observation.ts:266-291,
+      // 145-150). sessionQuery is hard-injected (see `inject`); a host
+      // missing it is a load-time contract failure rather than a runtime
+      // silent degradation.
+      let observation: SessionObservation | undefined
       try {
-        const inspected = await ctx.sessionPersistence.inspect(sessionId as Session['id'])
+        try {
+          observation = await sessionQuery!.observeSession(sessionId as Session['id'])
+        } catch (error) {
+          if (error instanceof SessionQueryError
+            && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') return null
+          ctx.logger.debug(
+            `dsh-session-fork: session-query observation of "${sessionId}" failed: ${String(error)}`,
+          )
+          return null
+        }
+        if (observation === undefined) return null
+        const events = observation.events
         const view: SourceSessionView = {
-          id: inspected.meta.id,
-          events: [...inspected.events],
-          header: inspected.meta.cwd === undefined ? {} : { cwd: inspected.meta.cwd },
+          id: observation.header.id,
+          events,
+          header: observation.header.cwd === undefined ? {} : { cwd: observation.header.cwd },
         }
         sourceLogs.set(view, {
-          header: inspected.meta,
-          events: inspected.events,
-          inheritedEventCount: inspected.inheritedEventCount,
+          header: observation.header,
+          events,
+          inheritedEventCount: observation.inheritedEventCount,
+          // Projected preset wins; the projection's init is itself header.agentPreset,
+          // so this falls back to the creation-time value when the projection
+          // registry is absent (a non-default deployment) — never undefined when
+          // one was ever selected.
+          agentPreset: observation.projections?.values.agentPreset ?? observation.header.agentPreset,
         })
         return view
-      } catch (error) {
-        ctx.logger.debug(
-          `dsh-session-fork: inspect of session "${sessionId}" failed: ${String(error)}`,
-        )
-        return null
+      } finally {
+        observation?.[Symbol.dispose]()
       }
     },
     async createChildFromSeed(childId, source, cut, forkNotice) {
@@ -329,9 +344,15 @@ function makePorts(ctx: Context): BranchPorts {
           { id: source.id, header: log.header },
         )
       const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+      // The preset the source actually runs under is the one resolved at
+      // readSession time from the agentPreset projection (with the header
+      // fallback when the projection registry is absent) — the same
+      // `presetForObservation(observation)` upstream applies (commands.ts:244,
+      // agent.ts:504-509). `agentPreset` is undefined on a deployment that
+      // composes none, which composeAgent handles gracefully.
       const forkComposition = await composeAgent(
         { presets, installSelection: () => { } },
-        resolveSessionPreset(log),
+        log.agentPreset,
       )
       // Seed the same default model selection the host's entry points use.
       // Issue #28: the fork notice rides the seed as its final event —
@@ -592,6 +613,10 @@ export async function apply(ctx: Context): Promise<void> {
     })
 
     if (connection !== undefined) {
+      // Mirror makePorts's sessionQuery binding so the rpc read path uses
+      // the same live-first observation contract (the fork path closed over
+      // its own binding above).
+      const sessionQuery = ctx.get('sessionQuery') as { observeSession(sessionId: Session['id'], options?: { projectionMode?: 'all' | 'none' }): Promise<SessionObservation> } | undefined
       const rpcPorts: BranchRpcPorts = {
         // Live-first workspace resolution, the same order makePorts uses.
         resolveWorkspaceKey: (sessionId) => resolveWorkspaceKey(ctx, sessionId),
@@ -604,36 +629,35 @@ export async function apply(ctx: Context): Promise<void> {
         async saveRegistry(workspaceKey, state) {
           await saveRegistry(openStore(workspaceKey), state)
         },
-        // Graph assembly reads whole logs: live store first, persistence
-        // inspect as the cold fallback — the same order makePorts.readSession
-        // uses, but returning the header lineage facts
-        // (inheritedEventCount / parentSession) instead of a fork view.
+        // Graph assembly reads whole logs via session-query, with projections
+        // skipped (projectionMode 'none') since the graph only consumes
+        // header lineage + events. The same live-first observation the fork
+        // path uses — the rpc-side lease is disposed before the function
+        // returns; the frozen arrays we pass downstream stay valid
+        // (observation.ts:266-291).
         async readSession(sessionId) {
-          const live = ctx.sessions.get(sessionId as Session['id'])
-          if (live !== undefined) {
-            return {
-              header: {
-                inheritedEventCount: live.inheritedEventCount,
-                ...(live.header.parentSession === undefined
-                  ? {}
-                  : { parentSession: live.header.parentSession as string }),
-              },
-              events: live.snapshotEvents(),
-            }
-          }
+          let observation: SessionObservation | undefined
           try {
-            const inspected = await ctx.sessionPersistence.inspect(sessionId as Session['id'])
+            try {
+              observation = await sessionQuery!.observeSession(
+                sessionId as Session['id'],
+                { projectionMode: 'none' },
+              )
+            } catch {
+              return null
+            }
+            if (observation === undefined) return null
             return {
               header: {
-                inheritedEventCount: inspected.inheritedEventCount,
-                ...(inspected.meta.parentSession === undefined
+                inheritedEventCount: observation.inheritedEventCount,
+                ...(observation.header.parentSession === undefined
                   ? {}
-                  : { parentSession: inspected.meta.parentSession as string }),
+                  : { parentSession: observation.header.parentSession as string }),
               },
-              events: [...inspected.events],
+              events: observation.events,
             }
-          } catch {
-            return null
+          } finally {
+            observation?.[Symbol.dispose]()
           }
         },
         sessionExists: (id) => sessionExists(ctx, id),
