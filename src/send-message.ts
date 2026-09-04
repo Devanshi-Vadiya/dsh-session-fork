@@ -1,6 +1,6 @@
 /**
  * Branch-to-branch messaging (issue #47): the pure executor behind the
- * `send_message` tool. One registered branch sends a short text message to
+ * `send_message_by_branch` tool. One registered branch sends a short text message to
  * another registered branch BY NAME; the message rides the shared
  * `<branch-message>` envelope (src/branch-events.ts) and is delivered into
  * the target's inbox through `agent.steer()` — the waking transport:

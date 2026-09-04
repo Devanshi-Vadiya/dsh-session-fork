@@ -417,7 +417,7 @@ describe('registerBranchTools', () => {
     }, h.ports)
     expect(registered).toEqual([
       'branch_list', 'branch_create', 'branch_adopt', 'branch_rename', 'branch_remove',
-      'squash_into', 'rebased_into', 'send_message',
+      'squash_into', 'rebased_into', 'send_message_by_branch',
     ])
     expect(disposed.length).toBe(0)
     dispose()

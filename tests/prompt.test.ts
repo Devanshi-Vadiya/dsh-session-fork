@@ -35,7 +35,7 @@ describe('branch vocabulary section', () => {
       'fork',
       'squash_into',
       'rebased_into',
-      'send_message',
+      'send_message_by_branch',
       'branch tab',
       'registry',
       'archives',
