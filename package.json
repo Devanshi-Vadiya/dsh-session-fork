@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-fork",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "dsh plugin: git-like conversation forking (branch refs on sessions)",
   "type": "module",
   "license": "MIT",
