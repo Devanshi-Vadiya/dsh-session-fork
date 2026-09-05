@@ -188,7 +188,6 @@ export function branchEnvelopeText(
   facts: BranchEventFacts,
   payload: string,
 ): string {
-
   const rangePart = facts.range !== undefined ? `, covering its turns ${facts.range.start}–${facts.range.end}` : ''
   const originPart = facts.atTurn !== undefined ? ` (forked at turn ${facts.atTurn}${rangePart})` : rangePart !== '' ? ` (${rangePart.slice(2)})` : ''
   const preamble =
@@ -226,7 +225,7 @@ export function buildBranchEnvelope(
       kind: 'plugin',
       plugin: 'dsh-session-fork',
       form: 'notice',
-     summary: boundContextSummary(`${facts.kind}: ${facts.from} → ${facts.to}`),
+      summary: boundContextSummary(`${facts.kind}: ${facts.from} → ${facts.to}`),
     }
   return createUserMessage({
     content: [{ type: 'text', text: branchEnvelopeText(facts, payload) }],
