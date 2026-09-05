@@ -88,14 +88,6 @@ export type BranchEventSource =
     readonly form: 'recall'
   }
 
-/** One page of a multi-page envelope payload (rebased-into transcripts can be long). */
-export interface BranchEventPage {
-  /** 1-based page index. */
-  readonly index: number
-  /** Total page count; > 1 marks this as a paged delivery. */
-  readonly total: number
-}
-
 /**
  * Build a one-line branch event notice: no payload, no tags. Used for fork
  * notifications in both directions (the parent learns it was forked; the
@@ -189,16 +181,13 @@ const TREAT_AS: Readonly<Record<BranchEventKind, string>> = {
  * builder output through the parser.
  * @param facts - the event facts; `kind` is 'squash', 'rebased-into', or
  *   'message' (fork has no payload).
- * @param payload - the verbatim payload text (summary or transcript page).
- * @param page - paging coordinates for multi-message rebased-into transcripts.
+ * @param payload - the verbatim payload text (summary or transcript).
  * @returns the complete envelope text.
  */
 export function branchEnvelopeText(
   facts: BranchEventFacts,
   payload: string,
-  page?: BranchEventPage,
 ): string {
-  const pagePart = page !== undefined && page.total > 1 ? ` ${page.index}/${page.total}` : ''
   const rangePart = facts.range !== undefined ? `, covering its turns ${facts.range.start}–${facts.range.end}` : ''
   const originPart = facts.atTurn !== undefined ? ` (forked at turn ${facts.atTurn}${rangePart})` : rangePart !== '' ? ` (${rangePart.slice(2)})` : ''
   const preamble =
@@ -207,7 +196,7 @@ export function branchEnvelopeText(
     `it is not part of this branch's own conversation. ${TREAT_AS[facts.kind]}`
   return (
     `${preamble}\n` +
-    `<branch-${facts.kind}${pagePart}>\n` +
+    `<branch-${facts.kind}>\n` +
     `${payload}\n` +
     `</branch-${facts.kind}>`
   )
@@ -220,14 +209,12 @@ export function branchEnvelopeText(
  * ({@link parseTransferPreamble}), never through source extensions.
  * @param facts - the event facts; `kind` is 'squash', 'rebased-into', or
  *   'message' (fork has no payload).
- * @param payload - the verbatim payload text (summary or transcript page).
- * @param page - paging coordinates for multi-message rebased-into transcripts.
+ * @param payload - the verbatim payload text (summary or transcript).
  * @returns a user message whose source carries only legal members.
  */
 export function buildBranchEnvelope(
   facts: BranchEventFacts,
   payload: string,
-  page?: BranchEventPage,
 ): UserMessage {
   // The frozen vocabulary admits `summary` only on the notice form, so the
   // recall-form rebased-into envelope carries none — its preamble line is
@@ -238,14 +225,10 @@ export function buildBranchEnvelope(
       kind: 'plugin',
       plugin: 'dsh-session-fork',
       form: 'notice',
-      summary: boundContextSummary(
-        page !== undefined && page.total > 1
-          ? `${facts.kind} ${page.index}/${page.total}: ${facts.from} → ${facts.to}`
-          : `${facts.kind}: ${facts.from} → ${facts.to}`,
-      ),
+      summary: boundContextSummary(`${facts.kind}: ${facts.from} → ${facts.to}`),
     }
   return createUserMessage({
-    content: [{ type: 'text', text: branchEnvelopeText(facts, payload, page) }],
+    content: [{ type: 'text', text: branchEnvelopeText(facts, payload) }],
     source,
   })
 }
