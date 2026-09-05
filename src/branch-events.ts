@@ -3,30 +3,33 @@
  * (fork, squash, rebased-into, adopt, rename, message) renders an AI-visible
  * provenance message.
  *
- * Design contract (agreed 2026-08-22 before the enhance-fork / enhance-squash
- * / implement-rebased-into workstreams forked off):
+ * Design contract (agreed 2026-08-22; source shape re-baselined 2026-09-05):
  *
- * - Every branch event is ONE `user/message`. The `source` carries
- *   machine-readable provenance (`branchEvent`) plus a UI-facing
- *   `form`/`summary`; the model never sees those fields, so the content text
- *   is ALWAYS self-describing.
+ * - Every branch event is ONE `user/message`. The message `source` carries
+ *   ONLY members of the frozen session-format plugin-source vocabulary —
+ *   `kind`, `plugin`, `form`, `summary` (plus `compactionId`/
+ *   `sourceCommandId` under `plugin: 'compact'`; deepseek-harness
+ *   session-format-v0-to-v1/src/payload-validation.ts `pluginSourceValue`).
+ *   The format's read path rejects unknown source members and thereby makes
+ *   the whole session log unloadable, so structured provenance must NOT
+ *   ride the source (2026-09-05 incident: `branchEvent` poisoned 66 logs).
+ * - The `content` text is ALWAYS self-describing — and for the transfer
+ *   kinds (squash, rebased-into) the preamble additionally is the MACHINE
+ *   contract: {@link parseTransferPreamble} recovers `{kind, fromName}`
+ *   from it, which is how the branch graph (src/graph.ts) recognizes
+ *   transfer rows without any source extensions.
  * - Two shapes exist:
  *   - `buildBranchNotice` — a one-line account of something that happened
- *     (fork notifications, both directions). No payload, no tags.
+ *     (fork notifications both directions, adopt, rename). No payload, no tags.
  *   - `buildBranchEnvelope` — an English preamble plus an XML-style
  *     `<branch-<kind>>` tag pair wrapping a payload (squash summary, rebased-into
  *     transcript pages), mirroring the official compaction checkpoint shape
  *     (compaction-basic/src/summarizer.ts: `CHECKPOINT_PREAMBLE` +
  *     `<compacted-summary>` tags). The tags delimit material that
  *     ORIGINATED ON ANOTHER BRANCH, for the model and the human reader alike.
- * - This module owns the wording; the three workstreams own the transport
+ * - This module owns the wording; the delivery workstreams own the transport
  *   (seed embedding, inbox injection, maintenance-window append). Keeping
- *   the text here keeps the three branches merge-conflict-free.
- *
- * - 2026-08-22 extension: both builders accept `extraSource` — caller-owned
- *   fields spread onto the message `source` AFTER `branchEvent` (e.g.
- *   MergeCheckpointSource's childSessionId/shadowedRange/...).
- *   Optional: existing callers and wire shapes are unchanged.
+ *   the text here keeps the branches merge-conflict-free.
  * Pure text construction, no cordis, no I/O — unit-testable with plain
  * assertions, mirroring the purity discipline of `squash.ts`.
  * @module dsh-session-fork/src/branch-events
@@ -59,26 +62,31 @@ export interface BranchEventFacts {
   readonly atTurn?: number
   /** The child-side turn range this event covers (squash region, rebased-into graft). */
   readonly range?: { readonly start: number; readonly end: number }
-  /** Session id of the `from` branch, for machine consumers. */
-  readonly fromSessionId?: string
 }
 
 /**
- * Machine-readable provenance riding the message `source`. Extends the
- * official plugin-source shape (merge-extensible `MessageSourceMap`, cf.
- * `MergeCheckpointSource` in squash.ts); `isCompactCheckpointSource`-style
- * consumers ignore unknown fields, and the model never sees any of this.
+ * The message source of a branch event: EXACTLY the frozen plugin-source
+ * vocabulary of the session format (`kind`/`plugin`/`form`, with `summary`
+ * admitted only on the notice form; deepseek-harness
+ * session-format-v0-to-v1 `pluginSourceValue`). Unknown members make a
+ * session log refuse to load under the format read path, so
+ * machine-readable provenance lives in the preamble text instead — see
+ * {@link parseTransferPreamble}.
  */
-export interface BranchEventSource {
-  readonly kind: 'plugin'
-  readonly plugin: 'dsh-session-fork'
-  /** 'recall' when the payload is lifted out of another session's log (rebased-into transcripts). */
-  readonly form: 'notice' | 'recall'
-  /** One-line UI account, bounded to the official 120-char notice limit. */
-  readonly summary: string
-  /** Structured provenance for future DAG consumers (visualizers, rename tracking). */
-  readonly branchEvent: BranchEventFacts
-}
+export type BranchEventSource =
+  | {
+    readonly kind: 'plugin'
+    readonly plugin: 'dsh-session-fork'
+    readonly form: 'notice'
+    /** One-line UI account, bounded to the official 120-char notice limit. */
+    readonly summary: string
+  }
+  | {
+    readonly kind: 'plugin'
+    readonly plugin: 'dsh-session-fork'
+    /** Recall-form material lifted from another session's log carries no summary. */
+    readonly form: 'recall'
+  }
 
 /** One page of a multi-page envelope payload (rebased-into transcripts can be long). */
 export interface BranchEventPage {
@@ -89,34 +97,17 @@ export interface BranchEventPage {
 }
 
 /**
- * Caller-owned source fields. The reserved keys a builder owns (`kind`,
- * `form`, `summary`, `branchEvent`) are compile-time rejected so a caller can
- * never silently rewrite the envelope's semantics; overriding `plugin` (the
- * squash checkpoint's `isCompactCheckpointSource` compatibility) stays legal.
- */
-export type BranchEventExtraSource = Record<string, unknown> & {
-  kind?: never
-  form?: never
-  summary?: never
-  branchEvent?: never
-}
-
-/**
  * Build a one-line branch event notice: no payload, no tags. Used for fork
  * notifications in both directions (the parent learns it was forked; the
  * child's seed marker is a notice too — a fork carries no payload, only the
- * fact of divergence).
- * @param facts - the event facts; `kind` must be 'fork'.
+ * fact of divergence), and for adopt/rename announcements.
+ * @param facts - the event facts; `kind` must be a payload-less kind.
  * @param line - the complete one-line statement.
- * @param extraSource - caller-owned fields spread onto the source AFTER
- *   `branchEvent` (e.g. MergeCheckpointSource fields); the reserved keys this
- *   builder owns are compile-time rejected ({@link BranchEventExtraSource}).
- * @returns a user message whose source carries the structured provenance.
+ * @returns a user message whose source stays inside the frozen vocabulary.
  */
 export function buildBranchNotice(
   facts: BranchEventFacts,
   line: string,
-  extraSource?: BranchEventExtraSource,
 ): UserMessage {
   return createUserMessage({
     content: [{ type: 'text', text: line }],
@@ -125,9 +116,7 @@ export function buildBranchNotice(
       plugin: 'dsh-session-fork',
       form: 'notice',
       summary: boundContextSummary(`${facts.kind}: ${facts.from} → ${facts.to}`),
-      branchEvent: facts,
-      ...extraSource,
-    } as BranchEventSource & Record<string, unknown>,
+    } satisfies BranchEventSource,
   })
 }
 
@@ -187,28 +176,28 @@ const TREAT_AS: Readonly<Record<BranchEventKind, string>> = {
 }
 
 /**
- * Build a branch event envelope around a payload: an English preamble plus
- * an XML-style tag pair, mirroring the official compaction checkpoint. The
- * payload is material from ANOTHER branch: a squash summary, one page of a
- * rebased-into transcript, or a live message. The preamble states full
- * provenance and marks the material per kind (settled material as
- * background, a message as peer input); the close tag keeps later grafted
- * material from blurring into the target's own history.
+ * The envelope text: an English preamble plus an XML-style tag pair,
+ * mirroring the official compaction checkpoint. The payload is material
+ * from ANOTHER branch: a squash summary, one page of a rebased-into
+ * transcript, or a live message. The preamble states full provenance and
+ * marks the material per kind (settled material as background, a message
+ * as peer input); the close tag keeps later grafted material from blurring
+ * into the target's own history.
+ *
+ * The preamble's head is a MACHINE contract — {@link parseTransferPreamble}
+ * keys on it — so its wording must not drift; tests round-trip every
+ * builder output through the parser.
  * @param facts - the event facts; `kind` is 'squash', 'rebased-into', or
  *   'message' (fork has no payload).
  * @param payload - the verbatim payload text (summary or transcript page).
  * @param page - paging coordinates for multi-message rebased-into transcripts.
- * @param extraSource - caller-owned fields spread onto the source AFTER
- *   `branchEvent` (e.g. MergeCheckpointSource fields); the reserved keys this
- *   builder owns are compile-time rejected ({@link BranchEventExtraSource}).
- * @returns a user message whose source carries the structured provenance.
+ * @returns the complete envelope text.
  */
-export function buildBranchEnvelope(
+export function branchEnvelopeText(
   facts: BranchEventFacts,
   payload: string,
   page?: BranchEventPage,
-  extraSource?: BranchEventExtraSource,
-): UserMessage {
+): string {
   const pagePart = page !== undefined && page.total > 1 ? ` ${page.index}/${page.total}` : ''
   const rangePart = facts.range !== undefined ? `, covering its turns ${facts.range.start}–${facts.range.end}` : ''
   const originPart = facts.atTurn !== undefined ? ` (forked at turn ${facts.atTurn}${rangePart})` : rangePart !== '' ? ` (${rangePart.slice(2)})` : ''
@@ -216,24 +205,72 @@ export function buildBranchEnvelope(
     `This is a ${facts.kind} from branch "${facts.from}"${originPart} into branch "${facts.to}". ` +
     `The ${MATERIAL_NOUN[facts.kind]} below happened on "${facts.from}" and was transferred by dsh-session-fork; ` +
     `it is not part of this branch's own conversation. ${TREAT_AS[facts.kind]}`
-  const text =
+  return (
     `${preamble}\n` +
     `<branch-${facts.kind}${pagePart}>\n` +
     `${payload}\n` +
     `</branch-${facts.kind}>`
-  return createUserMessage({
-    content: [{ type: 'text', text }],
-    source: {
+  )
+}
+
+/**
+ * Build a branch event envelope message around a payload. The source stays
+ * inside the frozen plugin-source vocabulary (see {@link BranchEventSource});
+ * machine consumers recognize transfer envelopes through the preamble
+ * ({@link parseTransferPreamble}), never through source extensions.
+ * @param facts - the event facts; `kind` is 'squash', 'rebased-into', or
+ *   'message' (fork has no payload).
+ * @param payload - the verbatim payload text (summary or transcript page).
+ * @param page - paging coordinates for multi-message rebased-into transcripts.
+ * @returns a user message whose source carries only legal members.
+ */
+export function buildBranchEnvelope(
+  facts: BranchEventFacts,
+  payload: string,
+  page?: BranchEventPage,
+): UserMessage {
+  // The frozen vocabulary admits `summary` only on the notice form, so the
+  // recall-form rebased-into envelope carries none — its preamble line is
+  // the self-describing account.
+  const source: BranchEventSource = facts.kind === 'rebased-into'
+    ? { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall' }
+    : {
       kind: 'plugin',
       plugin: 'dsh-session-fork',
-      form: facts.kind === 'rebased-into' ? 'recall' : 'notice',
+      form: 'notice',
       summary: boundContextSummary(
         page !== undefined && page.total > 1
           ? `${facts.kind} ${page.index}/${page.total}: ${facts.from} → ${facts.to}`
           : `${facts.kind}: ${facts.from} → ${facts.to}`,
       ),
-      branchEvent: facts,
-      ...extraSource,
-    } as BranchEventSource & Record<string, unknown>,
+    }
+  return createUserMessage({
+    content: [{ type: 'text', text: branchEnvelopeText(facts, payload, page) }],
+    source,
   })
+}
+
+/** The transfer facts recoverable from an envelope preamble. */
+export interface TransferPreamble {
+  /** Which transfer produced the envelope. */
+  readonly kind: 'squash' | 'rebased-into'
+  /** The source branch's NAME at event time (point-in-time, like a commit message). */
+  readonly fromName: string
+}
+
+/**
+ * Machine contract of the transfer preamble: recover the transfer kind and
+ * the source branch name from message text. The template lives in
+ * {@link branchEnvelopeText} and the pair is pinned by round-trip tests, so
+ * detection cannot drift from the wording. Branch names follow the official
+ * session-title pipeline, which does not forbid double quotes; a name that
+ * contains one simply fails the anchored match (the row then degrades to a
+ * non-transfer plugin message — no row, no edge — never a wrong fact).
+ * Non-transfer texts (message envelopes, notices, user prose) yield null.
+ * @param text - complete message text of any user message.
+ * @returns the transfer facts for squash/rebased-into envelopes, else null.
+ */
+export function parseTransferPreamble(text: string): TransferPreamble | null {
+  const match = /^This is a (squash|rebased-into) from branch "([^"]+)"(?: \([^)]*\))? into branch "/.exec(text)
+  return match === null ? null : { kind: match[1] as TransferPreamble['kind'], fromName: match[2]! }
 }

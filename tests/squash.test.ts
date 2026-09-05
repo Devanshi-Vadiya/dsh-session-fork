@@ -339,11 +339,8 @@ describe('buildMergeCheckpoint', () => {
 
   test('wraps the checkpoint payload in the squash envelope, keeping the compaction checkpoint marker', () => {
     const merged = buildMergeCheckpoint(checkpoint, {
-      childSessionId: 'session-child' as Session['id'],
-      shadowedRange: { start: 3, end: 9 },
-      shadowedSeqs: [3, 4, 9],
-      // Deliberately different numbers from shadowedRange: the preamble and
-      // branchEvent must speak turns, the source keeps seq coordinates.
+      // Deliberate turn numbers: the preamble must speak turns, the source
+      // keeps only the compaction identity.
       turnRange: { start: 2, end: 5 },
       compactionId: CompactionId('child-compaction'),
     }, names)
@@ -356,37 +353,25 @@ describe('buildMergeCheckpoint', () => {
     // Guard compatibility: plugin must stay 'compact' so official consumers
     // keep recognizing this node as a compaction checkpoint.
     expect(isCompactCheckpointSource(merged.source)).toBe(true)
-    const source = merged.source as MergeCheckpointSource & { branchEvent: Record<string, unknown> }
-    expect(source.kind).toBe('plugin')
-    expect(source.plugin).toBe('compact')
-    expect(source.childSessionId).toBe('session-child')
-    // The fork anchor atSeq is deliberately gone (issue #21): a single seq
-    // cannot point at a turn under any-two-branch squash semantics.
-    expect('atSeq' in source).toBe(false)
-    expect(source.shadowedRange).toEqual({ start: 3, end: 9 })
-    expect(source.shadowedSeqs).toEqual([3, 4, 9])
-    expect(source.compactionId).toBe(CompactionId('child-compaction'))
-    expect('sourceCommandId' in source).toBe(false)
-    expect(source.branchEvent).toMatchObject({
-      kind: 'squash',
-      from: 'review',
-      to: 'main',
-      range: { start: 2, end: 5 },
-      fromSessionId: 'session-child',
+    // The source stays inside the frozen plugin-source vocabulary: exactly
+    // the official compaction-checkpoint members, notice-formed for the UI
+    // row — no fork-merge extensions (they would make the log unloadable
+    // under the format read path; 2026-09-05 incident).
+    expect(merged.source).toEqual({
+      kind: 'plugin',
+      plugin: 'compact',
+      form: 'notice',
+      summary: 'squash: review → main',
+      compactionId: CompactionId('child-compaction'),
     })
   })
 
   test('omits the range clause when no turn range is known', () => {
     const merged = buildMergeCheckpoint(checkpoint, {
-      childSessionId: 'session-child' as Session['id'],
-      shadowedRange: { start: 3, end: 9 },
-      shadowedSeqs: [3, 4, 9],
       compactionId: CompactionId('child-compaction'),
     }, names)
     const text = merged.content.find(b => b.type === 'text')?.text ?? ''
     expect(text.startsWith('This is a squash from branch "review" into branch "main". ')).toBe(true)
-    const source = merged.source as { branchEvent: Record<string, unknown> }
-    expect('range' in source.branchEvent).toBe(false)
   })
 
   test('non-text checkpoint blocks surface as opaque placeholders instead of vanishing', () => {
@@ -398,9 +383,6 @@ describe('buildMergeCheckpoint', () => {
       source: compactCheckpointSource(CompactionId('child-compaction')),
     })
     const merged = buildMergeCheckpoint(mixed, {
-      childSessionId: 'session-child' as Session['id'],
-      shadowedRange: { start: 3, end: 9 },
-      shadowedSeqs: [3, 4, 9],
       compactionId: CompactionId('child-compaction'),
     }, names)
     const text = merged.content.find(b => b.type === 'text')?.text ?? ''
@@ -409,9 +391,6 @@ describe('buildMergeCheckpoint', () => {
 
   test('records the initiating command id when present', () => {
     const merged = buildMergeCheckpoint(checkpoint, {
-      childSessionId: 'session-child' as Session['id'],
-      shadowedRange: { start: 3, end: 9 },
-      shadowedSeqs: [3, 4, 9],
       compactionId: CompactionId('child-compaction'),
       sourceCommandId: 'cmd-7' as CommandId,
     }, names)

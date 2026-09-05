@@ -27,6 +27,8 @@
  *   (SessionHeader).
  */
 
+import { parseTransferPreamble } from './branch-events.js'
+
 /** Structural slice of one session event the graph consumes. */
 export interface GraphEvent {
   readonly seq: number
@@ -66,9 +68,10 @@ export interface TurnSlice {
   readonly subject: string
   /**
    * Transfer marker: set on standalone rows emitted for a `/squash` or
-   * `/rebased into` transfer envelope — a `user/message` whose plugin
-   * source carries a `branchEvent` of kind `squash`/`rebased-into`
-   * (src/branch-events.ts `buildBranchEnvelope`). The transfer is
+   * `/rebased into` transfer envelope — a `user/message` with a plugin
+   * source (plugin `dsh-session-fork` or `compact`) whose preamble parses
+   * as a transfer of kind `squash`/`rebased-into`
+   * (src/branch-events.ts `parseTransferPreamble`). The transfer is
    * semantically between-turns, but the `agent.inject()` transport can
    * deliver it inside an open turn bracket, so rows are emitted wherever
    * it lands; `turn` carries the envelope event's seq (there is no kernel
@@ -80,13 +83,15 @@ export interface TurnSlice {
 
 /**
  * The transfer facts a transfer row stands for: which kind of branch
- * transfer produced the envelope, and the source branch's session id
- * (`branchEvent.fromSessionId` — the merged child for squash, the
- * serialized source for rebased-into).
+ * transfer produced the envelope, and the source branch's NAME at event
+ * time (`branchEvent.from` successor — the preamble's quoted name, cf.
+ * `parseTransferPreamble` in src/branch-events.ts). The session id for the
+ * merge edge is resolved from the registry at assembly time; a name no
+ * registered branch carries (e.g. after a rename) degrades by omission.
  */
 export interface TransferFacts {
   readonly kind: 'squash' | 'rebased-into'
-  readonly fromSessionId: string
+  readonly fromName: string
 }
 
 /** First line of a text, trimmed — the squash row shows the summary head. */
@@ -96,30 +101,25 @@ function firstLine(text: string): string {
 }
 
 /**
- * The transfer facts when `data` is a branch-event envelope user message
- * (a `/squash` merge checkpoint or a `/rebased into` transcript), else
- * null. The envelope source is the shared branch-event shape
- * (`kind: 'plugin'`, `branchEvent: { kind, …, fromSessionId }`) built by
- * src/branch-events.ts `buildBranchEnvelope` — every delivered transfer
- * carries it, so the graph keys on the `branchEvent` facts rather than on
- * each kind's `extraSource` extensions (squash's `childSessionId`;
- * rebased-into has none). That is what separates transfer envelopes from
- * dsh's own `/compact` checkpoints and every other plugin message, which
- * stay filtered.
+ * The transfer facts when `data` is a branch-event transfer envelope user
+ * message (a `/squash` merge checkpoint or a `/rebased into` transcript),
+ * else null. Detection is two-keyed: a plugin source this plugin or the
+ * official compaction owns (`kind: 'plugin'` with plugin `dsh-session-fork`
+ * or `compact`), and the machine-contract preamble parsed by
+ * src/branch-events.ts `parseTransferPreamble` — the frozen session-format
+ * plugin-source vocabulary admits no structured provenance members, so the
+ * self-describing preamble text IS the durable machine record. Every
+ * delivered transfer carries it; `message` envelopes and plain notices do
+ * not match. That is what separates transfer envelopes from dsh's own
+ * `/compact` checkpoints and every other plugin message, which stay
+ * filtered.
  */
 function transferFactsOf(data: unknown): TransferFacts | null {
   if (data === null || typeof data !== 'object') return null
-  const source = (data as { source?: {
-    kind?: unknown
-    branchEvent?: { kind?: unknown; fromSessionId?: unknown } | null
-  } }).source
+  const source = (data as { source?: { kind?: unknown; plugin?: unknown } }).source
   if (source === null || typeof source !== 'object' || source.kind !== 'plugin') return null
-  const facts = source.branchEvent
-  if (facts === null || typeof facts !== 'object') return null
-  if (facts.kind !== 'squash' && facts.kind !== 'rebased-into') return null
-  return typeof facts.fromSessionId === 'string'
-    ? { kind: facts.kind, fromSessionId: facts.fromSessionId }
-    : null
+  if (source.plugin !== 'dsh-session-fork' && source.plugin !== 'compact') return null
+  return parseTransferPreamble(userMessageText(data))
 }
 
 /** Text of one user message: its text blocks joined and trimmed. */
@@ -462,6 +462,11 @@ export async function assembleBranchGraph(
     }
   }
 
+  // Branch name → session id, for resolving a squash transfer's source
+  // branch (the preamble carries the point-in-time NAME; the registry
+  // translates it into the session that owns the merge lane today).
+  const sessionIdByName = new Map<string, string>(branches.map(branch => [branch.name, branch.sessionId]))
+
   const mutableNodes: Array<GraphNode & { parentIds: string[]; refs: GraphNodeRef[] }> = []
   const sortKeys = new Map<string, { time: number; sessionIndex: number; seq: number }>()
   for (const [sessionIndex, sessionId] of sessionIds.entries()) {
@@ -479,13 +484,16 @@ export async function assembleBranchGraph(
       // A rebased-into row is deliberately NOT merge-shaped (user decision,
       // 2026-08-26): rebased-into injects information into the target —
       // "a rebase commit on the target branch" — it does not attach the
-      // source branch, so no second parent. Only a registered child branch
-      // resolves — an unregistered child (squash's header-lineage fallback)
-      // degrades by omission, matching how unreadable sessions and outside
-      // anchors degrade (user decision).
+      // source branch, so no second parent. Only a branch name the registry
+      // still carries resolves — an unregistered child (or one renamed away
+      // since the transfer) degrades by omission, matching how unreadable
+      // sessions and outside anchors degrade (user decision).
       if (turn.transferOf?.kind === 'squash') {
-        const childHead = ownTurns.get(turn.transferOf.fromSessionId)?.at(-1)
-        if (childHead !== undefined) parentIds.push(sliceId(turn.transferOf.fromSessionId, childHead))
+        const childSessionId = sessionIdByName.get(turn.transferOf.fromName)
+        const childHead = childSessionId === undefined ? undefined : ownTurns.get(childSessionId)?.at(-1)
+        if (childSessionId !== undefined && childHead !== undefined) {
+          parentIds.push(sliceId(childSessionId, childHead))
+        }
       }
       const id = sliceId(sessionId, turn)
       mutableNodes.push({

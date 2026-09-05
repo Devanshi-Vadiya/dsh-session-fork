@@ -156,7 +156,6 @@ export async function executeRebase(
     ...transcript.turns.start !== undefined && transcript.turns.end !== undefined
       ? { range: { start: transcript.turns.start, end: transcript.turns.end } }
       : {},
-    fromSessionId: sourceSession.id,
   }
   const envelope = buildBranchEnvelope(facts, transcript.text)
 

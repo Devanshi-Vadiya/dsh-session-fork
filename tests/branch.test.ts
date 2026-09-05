@@ -227,7 +227,6 @@ describe('createBranchFrom', () => {
       from: 'main',
       to: 'review',
       atTurn: 2,
-      fromSessionId: 'parent',
     })
   })
 
@@ -249,8 +248,10 @@ describe('createBranchFrom', () => {
     expect(event.surfaceOp).toBe('append')
     expect((event.data as { content: readonly { type: string; text: string }[] }).content[0]?.text)
       .toContain('You are branch "review", forked from branch "parent" at turn 2')
-    const source = (event.data as { source: { branchEvent: typeof facts } }).source.branchEvent
-    expect(source.fromSessionId).toBe('parent')
+    const source = (event.data as { source: Record<string, unknown> }).source
+    // The notice source stays inside the frozen plugin vocabulary; the fork
+    // facts ride the self-describing text (2026-09-05 source re-baseline).
+    expect(Object.keys(source).sort()).toEqual(['form', 'kind', 'plugin', 'summary'])
   })
 })
 
