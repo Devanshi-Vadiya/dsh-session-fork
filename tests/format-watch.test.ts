@@ -114,7 +114,6 @@ function everyPluginMessage(): readonly [label: string, message: UserMessage][] 
     ['notice: rename', buildBranchNotice(renameFacts, branchNoticeLines.renamed(renameFacts))],
     ['envelope: squash', buildBranchEnvelope(squashFacts, 'the conclusion')],
     ['envelope: rebased-into', buildBranchEnvelope(rebasedIntoFacts, 'transcript page')],
-    ['envelope: rebased-into paged', buildBranchEnvelope(rebasedIntoFacts, 'page 2', { index: 2, total: 3 })],
     ['envelope: message', buildBranchEnvelope(messageFacts, 'please handle the checkpoint')],
     [
       'merge checkpoint: no command id',

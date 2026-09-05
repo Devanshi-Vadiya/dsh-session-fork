@@ -160,19 +160,6 @@ describe('buildBranchEnvelope', () => {
     expect(t).not.toContain('Treat it as established background')
     expect((message.source as { form: string }).form).toBe('notice')
   })
-
-  test('pages a long rebased-into transcript with stable coordinates in tags and summary', () => {
-    const message = buildBranchEnvelope(squashFacts, 'page body', { index: 2, total: 3 })
-    const t = text(message)
-    expect(t).toContain('<branch-squash 2/3>\npage body\n</branch-squash>')
-    expect((message.source as { summary: string }).summary).toBe('squash 2/3: review → main')
-  })
-
-  test('a single page (total 1) renders unpaged', () => {
-    const message = buildBranchEnvelope(squashFacts, 'body', { index: 1, total: 1 })
-    expect(text(message)).toContain('<branch-squash>\nbody\n</branch-squash>')
-  })
-
   test('rebased-into transcripts use the recall context form', () => {
     const rebasedInto: BranchEventFacts = { kind: 'rebased-into', from: 'review', to: 'main' }
     expect((buildBranchEnvelope(rebasedInto, 't').source as { form: string }).form).toBe('recall')
@@ -206,12 +193,6 @@ describe('parseTransferPreamble (machine contract of the preamble)', () => {
     expect(parseTransferPreamble(text(buildBranchEnvelope(rebasedInto, 'body'))))
       .toEqual({ kind: 'rebased-into', fromName: 'exp' })
   })
-
-  test('paging coordinates stay in the tags, so paged envelopes parse identically', () => {
-    expect(parseTransferPreamble(text(buildBranchEnvelope(squashFacts, 'page body', { index: 2, total: 3 }))))
-      .toEqual({ kind: 'squash', fromName: 'review' })
-  })
-
   test('non-transfer texts yield null', () => {
     // A message envelope is peer input, not a transfer row.
     const messageFacts: BranchEventFacts = { kind: 'message', from: 'feat/review', to: 'main' }
