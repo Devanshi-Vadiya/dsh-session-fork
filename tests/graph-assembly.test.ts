@@ -134,21 +134,25 @@ describe('extractTurns', () => {
 
   test('a /squash merge checkpoint between turns emits its own row; ordinary /compact checkpoints do not', () => {
     // The squash checkpoint: official compaction-checkpoint source
-    // (kind plugin / plugin compact) extended with childSessionId — the
-    // one sanctioned plugin row. Its subject is the summary's first line.
+    // (kind plugin / plugin compact) whose text opens with the machine
+    // preamble — the one sanctioned plugin row. Its subject is the
+    // preamble's first line. Names a REGISTERED branch ("exp") so the
+    // merge edge can resolve.
     const events = [
       ...sessionEvents([{ turn: 1, subject: 'parent prompt', time: 1 }]),
       {
         seq: 3, type: 'user/message', time: 2,
         data: {
           role: 'user',
-          content: [{ type: 'text', text: 'squash summary line\nmore detail' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
-            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
+          content: [{
+            type: 'text',
+            text: 'This is a squash from branch "exp" into branch "main". squash summary line\nmore detail',
+          }],
+          source: { kind: 'plugin', plugin: 'compact', compactionId: 'c1' },
         },
       },
-      // dsh's own /compact checkpoint: same shape WITHOUT childSessionId —
-      // stays filtered like every other plugin message.
+      // dsh's own /compact checkpoint: plugin compact source WITHOUT the
+      // transfer preamble — stays filtered like every other plugin message.
       {
         seq: 4, type: 'user/message', time: 3,
         data: {
@@ -162,7 +166,7 @@ describe('extractTurns', () => {
     ]
     expect(extractTurns(events)).toEqual([
       { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'parent prompt' },
-      { turn: 3, startSeq: 3, endSeq: 3, startTime: 2, subject: 'squash summary line', transferOf: { kind: 'squash', fromSessionId: 's-child' } },
+      { turn: 3, startSeq: 3, endSeq: 3, startTime: 2, subject: 'This is a squash from branch "exp" into branch "main". squash summary line', transferOf: { kind: 'squash', fromName: 'exp' } },
       { turn: 2, startSeq: 5, endSeq: 7, startTime: 4, subject: 'later prompt' },
     ])
   })
@@ -180,9 +184,11 @@ describe('extractTurns', () => {
         seq: 4, type: 'user/message', time: 3,
         data: {
           role: 'user',
-          content: [{ type: 'text', text: 'squash summary line\nmore detail' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
-            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
+          content: [{
+            type: 'text',
+            text: 'This is a squash from branch "exp" into branch "main". squash summary line\nmore detail',
+          }],
+          source: { kind: 'plugin', plugin: 'compact', compactionId: 'c1' },
         },
       },
       {
@@ -197,7 +203,7 @@ describe('extractTurns', () => {
     ]
     expect(extractTurns(events)).toEqual([
       { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'parent prompt' },
-      { turn: 4, startSeq: 4, endSeq: 4, startTime: 3, subject: 'squash summary line', transferOf: { kind: 'squash', fromSessionId: 's-child' } },
+      { turn: 4, startSeq: 4, endSeq: 4, startTime: 3, subject: 'This is a squash from branch "exp" into branch "main". squash summary line', transferOf: { kind: 'squash', fromName: 'exp' } },
       { turn: 2, startSeq: 3, endSeq: 6, startTime: 2, subject: 'post-squash prompt' },
     ])
   })
@@ -211,23 +217,22 @@ describe('extractTurns', () => {
         seq: 1, type: 'user/message', time: 2,
         data: {
           role: 'user',
-          content: [{ type: 'text', text: 'squash summary line' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
-            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
+          content: [{ type: 'text', text: 'This is a squash from branch "exp" into branch "main". squash summary line' }],
+          source: { kind: 'plugin', plugin: 'compact', compactionId: 'c1' },
         },
       },
       { seq: 2, type: 'turn/end', time: 3, data: { turn: 1, reason: { kind: 'completed' } } },
     ]
     expect(extractTurns(events)).toEqual([
-      { turn: 1, startSeq: 1, endSeq: 1, startTime: 2, subject: 'squash summary line', transferOf: { kind: 'squash', fromSessionId: 's-child' } },
+      { turn: 1, startSeq: 1, endSeq: 1, startTime: 2, subject: 'This is a squash from branch "exp" into branch "main". squash summary line', transferOf: { kind: 'squash', fromName: 'exp' } },
     ])
   })
 
   test('a /rebased into envelope between turns emits its own row', () => {
     // The rebased-into transcript rides the shared branch-event envelope:
-    // source kind plugin (the envelope builder's own plugin name, form
-    // recall) with branchEvent kind 'rebased-into' and fromSessionId —
-    // the same detection key as squash, no compaction identity involved.
+    // plugin source (the envelope builder's own plugin name, form recall)
+    // whose preamble names the source branch — the same detection key as
+    // squash, no compaction identity involved.
     const events = [
       ...sessionEvents([{ turn: 1, subject: 'target prompt', time: 1 }]),
       {
@@ -235,8 +240,7 @@ describe('extractTurns', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'This is a rebased-into from branch "exp" into branch "main".\nuser: did work' }],
-          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall',
-            branchEvent: { kind: 'rebased-into', from: 'exp', to: 'main', fromSessionId: 's-exp' } },
+          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall' },
         },
       },
       ...sessionEvents([{ turn: 2, subject: 'later prompt', time: 4 }])
@@ -246,7 +250,7 @@ describe('extractTurns', () => {
       { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'target prompt' },
       { turn: 3, startSeq: 3, endSeq: 3, startTime: 2,
         subject: 'This is a rebased-into from branch "exp" into branch "main".',
-        transferOf: { kind: 'rebased-into', fromSessionId: 's-exp' } },
+        transferOf: { kind: 'rebased-into', fromName: 'exp' } },
       { turn: 2, startSeq: 5, endSeq: 7, startTime: 4, subject: 'later prompt' },
     ])
   })
@@ -263,8 +267,7 @@ describe('extractTurns', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'This is a rebased-into from branch "exp" into branch "main".\nuser: did work' }],
-          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall',
-            branchEvent: { kind: 'rebased-into', from: 'exp', to: 'main', fromSessionId: 's-exp' } },
+          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall' },
         },
       },
       {
@@ -281,7 +284,7 @@ describe('extractTurns', () => {
       { turn: 1, startSeq: 0, endSeq: 2, startTime: 1, subject: 'target prompt' },
       { turn: 4, startSeq: 4, endSeq: 4, startTime: 3,
         subject: 'This is a rebased-into from branch "exp" into branch "main".',
-        transferOf: { kind: 'rebased-into', fromSessionId: 's-exp' } },
+        transferOf: { kind: 'rebased-into', fromName: 'exp' } },
       { turn: 2, startSeq: 3, endSeq: 6, startTime: 2, subject: 'post-rebase prompt' },
     ])
   })
@@ -433,9 +436,9 @@ describe('assembleBranchGraph', () => {
 
   test('a squash row parents to both the previous parent-branch row and the child branch head', async () => {
     // Root gets a /squash merge checkpoint after its turns (from the child
-    // branch), then another human turn. The squash row is merge-shaped: it
-    // parents to the previous root row AND the registered child branch's
-    // head (the merge-join lane), ids s-prefixed by seq.
+    // branch "exp"), then another human turn. The squash row is
+    // merge-shaped: it parents to the previous root row AND the registered
+    // child branch's head (the merge-join lane), ids s-prefixed by seq.
     const rootTurns = sessionEvents([
       { turn: 1, subject: 'first', time: 10 },
       { turn: 2, subject: 'second', time: 20 },
@@ -449,9 +452,11 @@ describe('assembleBranchGraph', () => {
         seq: squashSeq, type: 'user/message', time: 30,
         data: {
           role: 'user',
-          content: [{ type: 'text', text: 'exp conclusion' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
-            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
+          content: [{
+            type: 'text',
+            text: 'This is a squash from branch "exp" into branch "main". exp conclusion',
+          }],
+          source: { kind: 'plugin', plugin: 'compact', compactionId: 'c1' },
         },
       },
       ...later,
@@ -467,7 +472,7 @@ describe('assembleBranchGraph', () => {
     ]
     const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
     const byId = new Map(graph.nodes.map(node => [node.id, node]))
-    expect(byId.get('s-root:s6')?.subject).toBe('exp conclusion')
+    expect(byId.get('s-root:s6')?.subject).toBe('This is a squash from branch "exp" into branch "main". exp conclusion')
     expect(byId.get('s-root:s6')?.parentIds).toEqual(['s-root:2', 's-child:1'])
     expect(byId.get('s-root:3')?.parentIds).toEqual(['s-root:s6'])
   })
@@ -492,9 +497,11 @@ describe('assembleBranchGraph', () => {
       seq: enclosingStart.seq + 0.5, type: 'user/message', time: 30,
       data: {
         role: 'user',
-        content: [{ type: 'text', text: 'exp conclusion' }],
-        source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-child', compactionId: 'c1',
-            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-child' } },
+        content: [{
+          type: 'text',
+          text: 'This is a squash from branch "exp" into branch "main". exp conclusion',
+        }],
+        source: { kind: 'plugin', plugin: 'compact', compactionId: 'c1' },
       },
     }
     const rootEvents: GraphEvent[] = [...rootTurns, ...enclosing, checkpoint]
@@ -510,16 +517,16 @@ describe('assembleBranchGraph', () => {
     ]
     const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
     const byId = new Map(graph.nodes.map(node => [node.id, node]))
-    expect(byId.get('s-root:s7.5')?.subject).toBe('exp conclusion')
+    expect(byId.get('s-root:s7.5')?.subject).toBe('This is a squash from branch "exp" into branch "main". exp conclusion')
     expect(byId.get('s-root:s7.5')?.parentIds).toEqual(['s-root:2', 's-child:1'])
     expect(byId.get('s-root:3')?.parentIds).toEqual(['s-root:s7.5'])
   })
 
   test('a squash row degrades to single-parent when the child is not a registered branch', async () => {
-    // Same shape, but the checkpoint's childSessionId names a session no
-    // branch record points at: its rows are absent from the graph, so the
-    // merge-join parent resolves to nothing and the row stays on the parent
-    // chain only.
+    // Same shape, but the preamble names a branch no registry record
+    // carries (removed, or renamed away since the transfer): its rows are
+    // absent from the graph, so the merge-join parent resolves to nothing
+    // and the row stays on the parent chain only.
     const rootTurns = sessionEvents([{ turn: 1, subject: 'first', time: 10 }])
     const rootEvents: GraphEvent[] = [
       ...rootTurns,
@@ -527,9 +534,11 @@ describe('assembleBranchGraph', () => {
         seq: rootTurns.length, type: 'user/message', time: 20,
         data: {
           role: 'user',
-          content: [{ type: 'text', text: 'stray conclusion' }],
-          source: { kind: 'plugin', plugin: 'compact', childSessionId: 's-unregistered', compactionId: 'c2',
-            branchEvent: { kind: 'squash', from: 'child', to: 'root', fromSessionId: 's-unregistered' } },
+          content: [{
+            type: 'text',
+            text: 'This is a squash from branch "ghost" into branch "main". stray conclusion',
+          }],
+          source: { kind: 'plugin', plugin: 'compact', compactionId: 'c2' },
         },
       },
     ]
@@ -541,7 +550,7 @@ describe('assembleBranchGraph', () => {
     ]
     const graph = await assembleBranchGraph(branches, 's-root', readerOf(logs).readSession)
     const byId = new Map(graph.nodes.map(node => [node.id, node]))
-    expect(byId.get('s-root:s3')?.subject).toBe('stray conclusion')
+    expect(byId.get('s-root:s3')?.subject).toBe('This is a squash from branch "ghost" into branch "main". stray conclusion')
     expect(byId.get('s-root:s3')?.parentIds).toEqual(['s-root:1'])
   })
 
@@ -565,8 +574,7 @@ describe('assembleBranchGraph', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'This is a rebased-into from branch "exp" into branch "main".\nuser: did work' }],
-          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall',
-            branchEvent: { kind: 'rebased-into', from: 'exp', to: 'main', fromSessionId: 's-exp' } },
+          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall' },
         },
       },
       ...later,
@@ -602,8 +610,7 @@ describe('assembleBranchGraph', () => {
         data: {
           role: 'user',
           content: [{ type: 'text', text: 'This is a rebased-into from branch "exp" into branch "main".' }],
-          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall',
-            branchEvent: { kind: 'rebased-into', from: 'exp', to: 'main', fromSessionId: 's-exp' } },
+          source: { kind: 'plugin', plugin: 'dsh-session-fork', form: 'recall' },
         },
       },
     ]

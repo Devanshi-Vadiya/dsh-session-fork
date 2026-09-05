@@ -206,7 +206,6 @@ export async function createBranchFrom(
     from: options.parentName ?? source.id,
     to: name,
     ...(anchorTurn === undefined ? {} : { atTurn: anchorTurn }),
-    fromSessionId: source.id,
   }
   const forkNotice = buildBranchNotice(facts, branchNoticeLines.forkChild(facts))
   // Single official route: agents.create with the seed prefix + workspace

@@ -183,7 +183,7 @@ describe('executeSquashAction', () => {
 
     // The parent received exactly one injected message through the public
     // queue API: the merge envelope, still recognized as a compaction
-    // checkpoint and carrying the fork-merge provenance.
+    // checkpoint, with the source inside the frozen plugin vocabulary.
     expect(parentAgent.injected.length).toBe(1)
     const injected = parentAgent.injected[0]!
     expect(injected.role).toBe('user')
@@ -193,8 +193,7 @@ describe('executeSquashAction', () => {
     expect(body).toContain('<branch-squash>\nsummary body\n</branch-squash>')
     const source = injected.source as Record<string, unknown>
     expect(isCompactCheckpointSource(injected.source)).toBe(true)
-    expect(source.childSessionId).toBe('session-child')
-    expect(source.shadowedSeqs).toEqual([2, 3])
+    expect(Object.keys(source).sort()).toEqual(['compactionId', 'form', 'kind', 'plugin', 'summary'])
     expect(source.compactionId).toBe('compaction-1')
 
     // The parent was flushed (and the child flushed through the compact

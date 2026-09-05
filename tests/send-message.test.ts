@@ -97,14 +97,12 @@ describe('executeSendMessage', () => {
     expect(text).not.toContain('Treat it as established background')
     // The payload rides verbatim.
     expect(text).toContain('please process the review checkpoint you received')
-    // Machine-readable provenance names both endpoints.
-    const source = steered[0]!.source as { branchEvent?: { kind: string; from: string; to: string } }
-    expect(source.branchEvent).toEqual({
-      kind: 'message',
-      from: 'review',
-      to: 'main',
-      fromSessionId: SOURCE_SESSION_ID,
-    })
+    // The source stays inside the frozen plugin vocabulary; both endpoints
+    // are named by the self-describing preamble (2026-09-05 re-baseline).
+    const source = steered[0]!.source as Record<string, unknown>
+    expect(Object.keys(source).sort()).toEqual(['form', 'kind', 'plugin', 'summary'])
+    expect(source.plugin).toBe('dsh-session-fork')
+    expect(source.form).toBe('notice')
   })
 
   test('empty text is refused before any delivery', async () => {

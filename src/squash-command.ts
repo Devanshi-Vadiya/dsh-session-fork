@@ -217,9 +217,6 @@ export async function executeSquash(
 
   let mergeMessage
   const provenance: MergeProvenance = {
-    childSessionId: childSession.id,
-    shadowedRange: result.shadowedRange,
-    shadowedSeqs: result.shadowedSeqs,
     turnRange: turnRangeOf(childSession, result.shadowedSeqs),
     compactionId: result.compactionId,
     ...deps.commandId === undefined ? {} : { sourceCommandId: deps.commandId },

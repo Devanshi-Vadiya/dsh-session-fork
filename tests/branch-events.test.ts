@@ -1,8 +1,9 @@
 /**
  * Tests for the shared branch event envelopes: notice lines, tag symmetry,
- * paging coordinates, and the machine-readable provenance riding the message
- * source. The wording follows the official compaction checkpoint style
- * (English preamble + XML-style tags).
+ * paging coordinates, the frozen-vocabulary source shapes, and the
+ * preamble's machine contract (parseTransferPreamble round-trips). The
+ * wording follows the official compaction checkpoint style (English
+ * preamble + XML-style tags).
  * @module dsh-session-fork/tests/branch-events.test
  */
 
@@ -11,6 +12,7 @@ import {
   branchNoticeLines,
   buildBranchEnvelope,
   buildBranchNotice,
+  parseTransferPreamble,
 } from '../src/branch-events.js'
 import type { BranchEventFacts } from '../src/branch-events.js'
 
@@ -49,7 +51,7 @@ const renameFacts: BranchEventFacts = {
 }
 
 describe('buildBranchNotice', () => {
-  test('renders the child line and the structured provenance on the source', () => {
+  test('renders the child line with a source inside the frozen plugin vocabulary', () => {
     const message = buildBranchNotice(forkFacts, branchNoticeLines.forkChild(forkFacts))
     expect(text(message)).toBe(
       'You are branch "review", forked from branch "main" at turn 12. ' +
@@ -57,11 +59,11 @@ describe('buildBranchNotice', () => {
       'Treat it as established background and continue the task from here.',
     )
     expect(message.role).toBe('user')
-    expect(message.source).toMatchObject({
+    expect(message.source).toEqual({
       kind: 'plugin',
       plugin: 'dsh-session-fork',
       form: 'notice',
-      branchEvent: { kind: 'fork', from: 'main', to: 'review', atTurn: 12 },
+      summary: 'fork: main → review',
     })
   })
 
@@ -85,9 +87,11 @@ describe('buildBranchNotice', () => {
       + 'The conversation is your own work. Treat branch-scoped operations (fork from here, squash into you, '
       + 'rebased into you) as applying to this session.',
     )
-    expect(message.source).toMatchObject({
+    expect(message.source).toEqual({
+      kind: 'plugin',
+      plugin: 'dsh-session-fork',
       form: 'notice',
-      branchEvent: { kind: 'adopt', from: 'sess-abc', to: 'main' },
+      summary: 'adopt: sess-abc → main',
     })
   })
 
@@ -98,9 +102,11 @@ describe('buildBranchNotice', () => {
       + 'Use "develop" in branch commands (/squash into, /rebased into, /branch rm). '
       + 'Earlier notices may still say "main" — they were true when written.',
     )
-    expect(message.source).toMatchObject({
+    expect(message.source).toEqual({
+      kind: 'plugin',
+      plugin: 'dsh-session-fork',
       form: 'notice',
-      branchEvent: { kind: 'rename', from: 'main', to: 'develop' },
+      summary: 'rename: main → develop',
     })
   })
 })
@@ -174,34 +180,54 @@ describe('buildBranchEnvelope', () => {
   })
 })
 
-describe('source extensions (extraSource)', () => {
-  const tracedFacts: BranchEventFacts = {
-    ...squashFacts,
-  }
+describe('source shapes (frozen plugin vocabulary)', () => {
+  test('every builder output carries exactly the legal members and nothing else', () => {
+    // Regression for the 2026-09-05 incident: unknown source members make a
+    // session log refuse to load under the session-format read path, so the
+    // builders must never emit one. See format-watch.test.ts for the rule's
+    // provenance.
+    expect(Object.keys(buildBranchNotice(forkFacts, 'line').source).sort())
+      .toEqual(['form', 'kind', 'plugin', 'summary'])
+    expect(Object.keys(buildBranchEnvelope(squashFacts, 'payload').source).sort())
+      .toEqual(['form', 'kind', 'plugin', 'summary'])
+    // The frozen vocabulary admits a summary only on the notice form, so
+    // the recall-form rebased-into envelope carries none.
+    const rebasedInto: BranchEventFacts = { kind: 'rebased-into', from: 'exp', to: 'main' }
+    expect(Object.keys(buildBranchEnvelope(rebasedInto, 'payload').source).sort())
+      .toEqual(['form', 'kind', 'plugin'])
+  })
+})
 
-  test('extraSource fields ride the built message source after branchEvent', () => {
-    const extra = {
-      childSessionId: 'sess-child',
-      shadowedRange: { start: 13, end: 20 },
-      shadowedSeqs: [26, 27],
-      sourceCommandId: 'cmd-9',
-    }
-    expect(buildBranchEnvelope(tracedFacts, 'payload', undefined, extra).source).toMatchObject({
-      kind: 'plugin',
-      plugin: 'dsh-session-fork',
-      branchEvent: tracedFacts,
-      ...extra,
-    })
-    expect(buildBranchNotice(tracedFacts, 'line', { childSessionId: 'sess-child' }).source).toMatchObject({
-      branchEvent: tracedFacts,
-      childSessionId: 'sess-child',
-    })
+describe('parseTransferPreamble (machine contract of the preamble)', () => {
+  test('round-trips every transfer kind the builders emit', () => {
+    expect(parseTransferPreamble(text(buildBranchEnvelope(squashFacts, 'body'))))
+      .toEqual({ kind: 'squash', fromName: 'review' })
+    const rebasedInto: BranchEventFacts = { kind: 'rebased-into', from: 'exp', to: 'main' }
+    expect(parseTransferPreamble(text(buildBranchEnvelope(rebasedInto, 'body'))))
+      .toEqual({ kind: 'rebased-into', fromName: 'exp' })
   })
 
-  test('omitting extraSource leaves the source shape unchanged (regression)', () => {
-    const source = buildBranchEnvelope(squashFacts, 'payload').source as Record<string, unknown>
-    expect(Object.keys(source).sort()).toEqual(['branchEvent', 'form', 'kind', 'plugin', 'summary'])
-    const noticeSource = buildBranchNotice(forkFacts, 'line').source as Record<string, unknown>
-    expect(Object.keys(noticeSource).sort()).toEqual(['branchEvent', 'form', 'kind', 'plugin', 'summary'])
+  test('paging coordinates stay in the tags, so paged envelopes parse identically', () => {
+    expect(parseTransferPreamble(text(buildBranchEnvelope(squashFacts, 'page body', { index: 2, total: 3 }))))
+      .toEqual({ kind: 'squash', fromName: 'review' })
+  })
+
+  test('non-transfer texts yield null', () => {
+    // A message envelope is peer input, not a transfer row.
+    const messageFacts: BranchEventFacts = { kind: 'message', from: 'feat/review', to: 'main' }
+    expect(parseTransferPreamble(text(buildBranchEnvelope(messageFacts, 'please handle')))).toBeNull()
+    // Notice lines are one-liners, not envelopes.
+    expect(parseTransferPreamble(branchNoticeLines.forkChild(forkFacts))).toBeNull()
+    expect(parseTransferPreamble(branchNoticeLines.forkParent(forkFacts))).toBeNull()
+    expect(parseTransferPreamble(branchNoticeLines.adopted(adoptFacts))).toBeNull()
+    expect(parseTransferPreamble(branchNoticeLines.renamed(renameFacts))).toBeNull()
+    // The parser is text-only: a quoted mimic of the anchored head matches
+    // — excluding human prose is the GRAPH's job (transferFactsOf requires
+    // a plugin source owned by this plugin or the official compaction).
+    expect(parseTransferPreamble('This is a squash from branch "x" into branch "y".'))
+      .toEqual({ kind: 'squash', fromName: 'x' })
+    expect(parseTransferPreamble('Loose prefix: this is a squash from branch "x" into branch "y".')).toBeNull()
+    expect(parseTransferPreamble('This is a squash from branch "x" into "y".')).toBeNull()
+    expect(parseTransferPreamble('')).toBeNull()
   })
 })

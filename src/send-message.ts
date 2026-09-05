@@ -111,7 +111,6 @@ export async function executeSendMessage(
     kind: 'message',
     from: sourceRecord.name,
     to: target,
-    fromSessionId: deps.sourceSession.id,
   }
   const envelope = buildBranchEnvelope(facts, text)
 

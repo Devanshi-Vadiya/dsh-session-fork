@@ -20,10 +20,11 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import type { ManualCompactionErrorCode } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
+import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { SessionSeq as sessionSeq } from '@deepseek-ai/dsh-session'
-import { buildBranchEnvelope } from './branch-events.js'
+import { branchEnvelopeText } from './branch-events.js'
 
 /** Typed failure codes of the pure squash logic. */
 export type SquashCoreErrorCode =
@@ -199,20 +200,22 @@ export function extractCheckpointMessage(session: Session): UserMessage {
  * targets the relevant boundary is the leaving fork edge of a third
  * ancestor, not a seq in the target log. AI never read the field and no
  * in-tree consumer depended on it, so it is gone rather than refilled.
+ *
+ * Note: `childSessionId`, `shadowedRange`, and `shadowedSeqs` were removed
+ * in the 2026-09-05 source re-baseline. They had zero readers, and carrying
+ * them on the source violated the frozen plugin-source vocabulary (unknown
+ * members make a session log refuse to load under the format read path).
+ * The shadowed coordinates belong to the CHILD's log — the child's own
+ * `compaction/summary` event keeps them durably in the right coordinate
+ * space — and the merge edge is recovered from the envelope preamble.
  */
 export interface MergeProvenance {
-  /** The child (source) branch's session id. */
-  readonly childSessionId: Session['id']
-  /** The compacted region by surface position in the source log. */
-  readonly shadowedRange: { readonly start: SessionSeq; readonly end: SessionSeq }
-  /** The shadowed surface-node seqs, in surface order. */
-  readonly shadowedSeqs: readonly SessionSeq[]
   /**
    * The compacted region in TURN coordinates, for the model-facing envelope
-   * preamble (`covering its turns A–B`). `shadowedRange` is surface-seq
-   * coordinates and must never reach the preamble — the two coordinate
-   * systems diverge whenever non-surface events (chunks, boundaries) sit
-   * inside the region. Absent when no shadowed event carries a turn number.
+   * preamble (`covering its turns A–B`). Surface-seq coordinates must never
+   * reach the preamble — the two coordinate systems diverge whenever
+   * non-surface events (chunks, boundaries) sit inside the region. Absent
+   * when no shadowed event carries a turn number.
    */
   readonly turnRange?: { readonly start: number; readonly end: number }
   /** The child compaction's durable transaction identity. */
@@ -222,20 +225,21 @@ export interface MergeProvenance {
 }
 
 /**
- * The merge checkpoint's message source: the official compaction checkpoint
- * shape extended with the merge provenance fields. `MessageSourceMap` is
- * merge-extensible and `isCompactCheckpointSource` ignores unknown fields,
- * so consumers keep recognizing this node as a compaction checkpoint while
- * the fork merge facts stay durably attached.
+ * The merge checkpoint's message source: the OFFICIAL compaction checkpoint
+ * shape (`plugin: 'compact'` + `compactionId`), notice-formed for the UI
+ * row. It carries no fork-merge extensions — the frozen session-format
+ * plugin-source vocabulary admits none, and `isCompactCheckpointSource`
+ * consumers must keep recognizing this node as a compaction checkpoint.
+ * The transfer facts live in the envelope preamble (src/branch-events.ts
+ * `parseTransferPreamble`).
  */
 export interface MergeCheckpointSource {
   readonly kind: 'plugin'
-  readonly plugin: string
+  readonly plugin: 'compact'
+  readonly form: 'notice'
+  readonly summary: string
   readonly compactionId: CompactionId
   readonly sourceCommandId?: CommandId
-  readonly childSessionId: Session['id']
-  readonly shadowedRange: { readonly start: SessionSeq; readonly end: SessionSeq }
-  readonly shadowedSeqs: readonly SessionSeq[]
 }
 
 /**
@@ -280,23 +284,19 @@ export function turnRangeOf(
  * Build the message appended into the parent branch: the child checkpoint's
  * payload (the conclusion itself, tags and all — nested `<compacted-summary>`
  * tags inside `<branch-squash>` are honest about the material's origin)
- * wrapped in the shared branch-event envelope, with the compaction identity
- * plus the fork-merge provenance riding the source. The official
- * session-event vocabulary is closed to downstream plugins, so no custom
- * merge event is emitted — the provenance rides this message's plugin source.
+ * wrapped in the shared branch-event envelope, with the official compaction
+ * checkpoint identity riding the source.
  *
  * Guard compatibility: `isCompactCheckpointSource` requires
- * `plugin === 'compact'` (dsh-compaction lib/types/checkpoint.js), so
- * `extraSource` overrides the envelope's `plugin: 'dsh-session-fork'` back to
- * `'compact'` — the merged node stays a recognized compaction checkpoint for
- * every official consumer.
- *
- * Coordinates: `facts.range` carries `shadowedRange` in source surface
- * positions (the source log's own coordinate system). Source/target logs are
- * independent coordinate spaces — consumers reading the source back must use
- * `shadowedRange` only against the source's events, never against the target's.
+ * `plugin === 'compact'` (dsh-compaction checkpoint.ts), so the source uses
+ * the official marker plus `compactionId` — the merged node stays a
+ * recognized compaction checkpoint for every official consumer, and the
+ * source stays inside the frozen plugin-source vocabulary (the format read
+ * path rejects unknown members; 2026-09-05 incident). The fork-merge facts
+ * ride the preamble text, where `parseTransferPreamble` recovers them for
+ * the branch graph.
  * @param checkpointMessage - the child's checkpoint message from {@link extractCheckpointMessage}.
- * @param provenance - fork and compaction facts to record on the source.
+ * @param provenance - compaction facts to record on the source.
  * @param branchNames - registry-resolved child and target branch names.
  * @returns the parent-ready user message.
  */
@@ -308,25 +308,28 @@ export function buildMergeCheckpoint(
   const payload = checkpointMessage.content
     .map(block => block.type === 'text' ? block.text : `(opaque ${block.type} block)`)
     .join('\n')
-  return buildBranchEnvelope(
-    {
-      kind: 'squash',
-      from: branchNames.child,
-      to: branchNames.target,
-      ...provenance.turnRange === undefined ? {} : { range: { ...provenance.turnRange } },
-      fromSessionId: provenance.childSessionId,
-    },
-    payload,
-    undefined,
-    {
+  return createUserMessage({
+    content: [{
+      type: 'text',
+      text: branchEnvelopeText(
+        {
+          kind: 'squash',
+          from: branchNames.child,
+          to: branchNames.target,
+          ...provenance.turnRange === undefined ? {} : { range: { ...provenance.turnRange } },
+        },
+        payload,
+      ),
+    }],
+    source: {
+      kind: 'plugin',
       plugin: 'compact',
+      form: 'notice',
+      summary: boundContextSummary(`squash: ${branchNames.child} → ${branchNames.target}`),
       compactionId: provenance.compactionId,
-      ...(provenance.sourceCommandId === undefined ? {} : { sourceCommandId: provenance.sourceCommandId }),
-      childSessionId: provenance.childSessionId,
-      shadowedRange: provenance.shadowedRange,
-      shadowedSeqs: [...provenance.shadowedSeqs],
-    },
-  )
+      ...provenance.sourceCommandId === undefined ? {} : { sourceCommandId: provenance.sourceCommandId },
+    } satisfies MergeCheckpointSource,
+  })
 }
 
 /** Fail loudly if a locally closed union gains an unhandled member. */
